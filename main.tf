@@ -526,6 +526,8 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot    = true
   publicly_accessible    = false
   deletion_protection    = false
+  # Required for read replica: automated backups must be enabled
+  backup_retention_period = 1
 
   tags = merge(local.common_tags, {
     Name = "${var.project_prefix}-postgres"
@@ -1862,6 +1864,12 @@ data "archive_file" "cloud_collector" {
   output_path = "${path.module}/cloud_collector.zip"
 }
 
+# AWS Academy uses a pre-existing IAM role (voclabs/LabRole) — we cannot create
+# new roles. Use a data source to reference the existing LabRole.
+data "aws_iam_role" "lab_role" {
+  name = "LabRole"
+}
+
 resource "aws_lambda_function" "cloud_collector" {
   filename      = data.archive_file.cloud_collector.output_path
   function_name = "${var.project_prefix}-cloud-collector"
@@ -1887,7 +1895,8 @@ resource "aws_lambda_function" "cloud_collector" {
     security_group_ids = [aws_security_group.lambda.id]
   }
 
-  role = aws_iam_role.lambda_cloud_collector.arn
+  # Use the pre-existing AWS Academy LabRole instead of creating a new one
+  role = data.aws_iam_role.lab_role.arn
 
   tags = merge(local.common_tags, {
     Name    = "${var.project_prefix}-cloud-collector"
@@ -1916,46 +1925,8 @@ resource "aws_lambda_permission" "allow_eventbridge" {
   source_arn    = aws_cloudwatch_event_rule.cloud_collector_schedule.arn
 }
 
-resource "aws_iam_role" "lambda_cloud_collector" {
-  name = "${var.project_prefix}-lambda-cloud-collector"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
-  })
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-lambda-cloud-collector" })
-}
-
-resource "aws_iam_role_policy" "lambda_cloud_collector" {
-  name = "${var.project_prefix}-lambda-cloud-collector-policy"
-  role = aws_iam_role.lambda_cloud_collector.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["ce:GetCostAndUsage", "ce:GetCostForecast"]
-        Resource = "*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface"]
-        Resource = "*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "*"
-      }
-    ]
-  })
-}
+# NOTE: aws_iam_role and aws_iam_role_policy removed — AWS Academy does not allow
+# iam:CreateRole. The Lambda now uses the pre-existing LabRole (see data source above).
 
 # -----------------------------------------------------------------------------
 # OUTPUTS - use these in JMeter HTTP Request samplers and for debugging
