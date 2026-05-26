@@ -4,9 +4,9 @@ const API_BASE_URL = 'https://${api_gw_url}';
 
 const CONFIG = {
   API_BASE_URL,
-  AUTH_URL:      `${API_BASE_URL}/auth`,
-  USUARIOS_URL:  `${API_BASE_URL}/projects`,
-  CLOUD_URL:     `${API_BASE_URL}/cloud`,
-  REPORTES_URL:  `${API_BASE_URL}/events`,
-  SEGURIDAD_URL: `${API_BASE_URL}/security`,
+  AUTH_URL:      `$${API_BASE_URL}/auth`,
+  USUARIOS_URL:  `$${API_BASE_URL}/projects`,
+  CLOUD_URL:     `$${API_BASE_URL}/cloud`,
+  REPORTES_URL:  `$${API_BASE_URL}/events`,
+  SEGURIDAD_URL: `$${API_BASE_URL}/security`,
 };
