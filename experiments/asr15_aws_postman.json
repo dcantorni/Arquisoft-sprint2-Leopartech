@@ -1,0 +1,74 @@
+{
+  "info": {
+    "name": "ASR15 — Procesamiento asíncrono (AWS)",
+    "description": "Login Cognito → POST /events/batch. IMPORTANTE: usar id_token (no access_token) en Authorization.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://bite2-alb-174434752.us-east-1.elb.amazonaws.com" },
+    { "key": "id_token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Login empresa_a",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const j = pm.response.json();",
+              "pm.collectionVariables.set('id_token', j.id_token);",
+              "pm.test('Login 200', () => pm.response.to.have.status(200));",
+              "pm.test('id_token presente', () => pm.expect(j.id_token).to.be.a('string'));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"empresa_a@bite.co\",\n  \"password\": \"BiteCo2024!\"\n}"
+        },
+        "url": "{{base_url}}/auth/login"
+      }
+    },
+    {
+      "name": "2. Validate token (id_token)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{id_token}}" }],
+        "url": "{{base_url}}/auth/validate"
+      }
+    },
+    {
+      "name": "3. POST /events/batch (ASR15)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('HTTP 202 Accepted', () => pm.response.to.have.status(202));",
+              "pm.test('Respuesta < 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{id_token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"events\": [\n    {\n      \"tipo\": \"proyecto_creado\",\n      \"data\": {\n        \"proyecto_id\": \"aaaaaaaa-0001-0001-0001-000000000099\",\n        \"empresa_id\": \"550e8400-e29b-41d4-a716-446655440001\",\n        \"nombre\": \"Test ASR15 AWS\"\n      }\n    }\n  ]\n}"
+        },
+        "url": "{{base_url}}/events/batch"
+      }
+    }
+  ]
+}

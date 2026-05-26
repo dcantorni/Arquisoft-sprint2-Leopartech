@@ -868,7 +868,7 @@ resource "aws_instance" "manejador_seguridad" {
     DATABASE_NAME=seguridad_db
     DATABASE_USER=seguridad_user
     DATABASE_PASSWORD=Seguridad_2024!
-    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    AUTH_SERVICE_URL=http://${aws_lb.main.dns_name}
     AUTH_SERVICE_TIMEOUT=2
     LOCAL_JWT_SECRET=bite-local-jwt-secret
     COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
@@ -884,7 +884,7 @@ resource "aws_instance" "manejador_seguridad" {
     export DATABASE_NAME=seguridad_db
     export DATABASE_USER=seguridad_user
     export DATABASE_PASSWORD='Seguridad_2024!'
-    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export AUTH_SERVICE_URL=http://${aws_lb.main.dns_name}
     export AUTH_SERVICE_TIMEOUT=2
     export LOCAL_JWT_SECRET=bite-local-jwt-secret
     export COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
@@ -1188,7 +1188,7 @@ resource "aws_launch_template" "usuarios" {
     DATABASE_PASSWORD=Usuarios_2024!
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
-    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    AUTH_SERVICE_URL=http://${aws_lb.main.dns_name}
     AUTH_SERVICE_TIMEOUT=10
     ALLOWED_HOSTS=${local.django_allowed_hosts}
     DEBUG=True
@@ -1203,7 +1203,7 @@ resource "aws_launch_template" "usuarios" {
     export DATABASE_PASSWORD='Usuarios_2024!'
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     export RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
-    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export AUTH_SERVICE_URL=http://${aws_lb.main.dns_name}
     export AUTH_SERVICE_TIMEOUT=10
     export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
@@ -1361,9 +1361,12 @@ resource "aws_launch_template" "reportes" {
     DATABASE_PASSWORD=Reportes_2024!
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     RABBITMQ_EXCHANGE=bite_events
-    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    AUTH_SERVICE_URL=http://${aws_lb.main.dns_name}
     AUTH_SERVICE_TIMEOUT=2
     LOCAL_JWT_SECRET=bite-local-jwt-secret
+    COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
+    COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
+    COGNITO_REGION=${var.region}
     ALLOWED_HOSTS=${local.django_allowed_hosts}
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
@@ -1380,9 +1383,12 @@ resource "aws_launch_template" "reportes" {
     export DATABASE_PASSWORD='Reportes_2024!'
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     export RABBITMQ_EXCHANGE=bite_events
-    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export AUTH_SERVICE_URL=http://${aws_lb.main.dns_name}
     export AUTH_SERVICE_TIMEOUT=2
     export LOCAL_JWT_SECRET=bite-local-jwt-secret
+    export COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
+    export COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
+    export COGNITO_REGION=${var.region}
     export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
