@@ -1,5 +1,6 @@
 import uuid
 import logging
+import time
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -7,7 +8,6 @@ from django.db import connection, OperationalError
 
 from .serializers import BatchEventSerializer, AnalisisSerializer, ReporteSerializer
 from .tasks import procesar_evento_batch
-from .publisher import publish_event, routing_key_for_event
 from .models import Analisis, Reporte
 
 logger = logging.getLogger(__name__)
@@ -17,8 +17,8 @@ class EventoBatchView(APIView):
     """
     POST /events/batch
 
-    Receives multiple events, publishes them to RabbitMQ immediately,
-    and returns HTTP 202 Accepted (async processing via Celery workers).
+    Receives multiple events, publishes them to RabbitMQ in background threads,
+    and returns HTTP 202 Accepted immediately (ASR15 async processing).
 
     Used for Experiment A – Scalability (architecture.md §4.1):
     - Target throughput: ≥ 500 events/min
@@ -27,6 +27,12 @@ class EventoBatchView(APIView):
     """
 
     def post(self, request):
+        request_start = time.perf_counter()
+        logger.info(
+            "[ASR15] POST /events/batch recibido: events_count=%s",
+            len(request.data.get('events', [])) if isinstance(request.data, dict) else '?',
+        )
+
         serializer = BatchEventSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -36,24 +42,36 @@ class EventoBatchView(APIView):
         failed = []
 
         for event in events:
-            # Assign idempotency ID if not provided
             evento_id = event.get('evento_id') or str(uuid.uuid4())
             event['evento_id'] = evento_id
 
             try:
-                # Dispatch to Celery (non-blocking, returns immediately)
                 task = procesar_evento_batch.apply_async(
                     args=[event],
                     task_id=evento_id,
                 )
                 accepted.append({'evento_id': evento_id, 'task_id': task.id})
+                logger.info(
+                    "[ASR15] evento encolado (async): evento_id=%s tipo=%s",
+                    evento_id,
+                    event.get('tipo', ''),
+                )
             except Exception:
-                logger.exception("Failed to enqueue event: %s", evento_id)
+                logger.exception("[ASR15] Failed to enqueue event: %s", evento_id)
                 failed.append({'evento_id': evento_id, 'error': 'enqueue_failed'})
 
+        elapsed_ms = (time.perf_counter() - request_start) * 1000
         response_status = (
             status.HTTP_202_ACCEPTED if not failed else status.HTTP_207_MULTI_STATUS
         )
+        logger.info(
+            "[ASR15] respuesta HTTP enviada: status=%s accepted=%d failed=%d elapsed_ms=%.1f",
+            response_status,
+            len(accepted),
+            len(failed),
+            elapsed_ms,
+        )
+
         return Response(
             {
                 'accepted': len(accepted),
@@ -104,7 +122,6 @@ class HealthCheckView(APIView):
         except OperationalError:
             checks['database'] = 'error'
 
-        # CHANGE 4: Redis removed from manejador_reportes — health check omits Redis
         try:
             import pika
             from django.conf import settings

@@ -64,18 +64,18 @@ func Connect(ctx context.Context) (*pgxpool.Pool, error) {
 func IsAlreadyProcessed(ctx context.Context, tx pgx.Tx, eventoID string) (bool, error) {
 	var count int
 	err := tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM eventos_entrantes WHERE evento_id = $1 AND estado = 'procesado'`,
+		`SELECT COUNT(*) FROM eventos_entrantes WHERE evento_id = $1 AND procesado = true`,
 		eventoID,
 	).Scan(&count)
 	return count > 0, err
 }
 
-// InsertEventoEntrante inserts a new incoming event record (estado=recibido).
+// InsertEventoEntrante inserts a new incoming event record (procesado=false).
 func InsertEventoEntrante(ctx context.Context, tx pgx.Tx, eventoID, tipoEvento string, payload []byte) (uuid.UUID, error) {
 	id := uuid.New()
 	_, err := tx.Exec(ctx,
-		`INSERT INTO eventos_entrantes (id, evento_id, tipo_evento, payload, estado, recibido_en)
-		 VALUES ($1, $2, $3, $4, 'recibido', NOW())
+		`INSERT INTO eventos_entrantes (id, evento_id, tipo_evento, payload, procesado, recibido_en)
+		 VALUES ($1, $2, $3, $4, false, NOW())
 		 ON CONFLICT (evento_id) DO NOTHING`,
 		id, eventoID, tipoEvento, payload,
 	)
@@ -85,7 +85,7 @@ func InsertEventoEntrante(ctx context.Context, tx pgx.Tx, eventoID, tipoEvento s
 // MarkEventoProcessed marks an evento_id as procesado.
 func MarkEventoProcessed(ctx context.Context, tx pgx.Tx, eventoID string) error {
 	_, err := tx.Exec(ctx,
-		`UPDATE eventos_entrantes SET estado = 'procesado', procesado_en = NOW()
+		`UPDATE eventos_entrantes SET procesado = true, procesado_en = NOW()
 		 WHERE evento_id = $1`,
 		eventoID,
 	)
@@ -145,16 +145,23 @@ func CompleteEjecucion(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, du
 // ── Reporte ──────────────────────────────────────────────────────────────────
 
 // InsertReporte creates a Reporte row and returns its UUID.
-func InsertReporte(ctx context.Context, tx pgx.Tx, proyectoID, empresaID uuid.UUID, periodoInicio, periodoFin time.Time, datos interface{}) (uuid.UUID, error) {
+func InsertReporte(
+	ctx context.Context,
+	tx pgx.Tx,
+	proyectoID, empresaID uuid.UUID,
+	nombre, tipo string,
+	periodoInicio, periodoFin time.Time,
+	datos interface{},
+) (uuid.UUID, error) {
 	id := uuid.New()
 	datosJSON, err := json.Marshal(datos)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO reportes (id, proyecto_id, empresa_id, periodo_inicio, periodo_fin, datos_reporte, generado_en)
-		 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-		id, proyectoID, empresaID, periodoInicio, periodoFin, datosJSON,
+		`INSERT INTO reportes (id, nombre, tipo, proyecto_id, empresa_id, periodo_inicio, periodo_fin, datos, generado_en)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+		id, nombre, tipo, proyectoID, empresaID, periodoInicio, periodoFin, datosJSON,
 	)
 	return id, err
 }
@@ -165,8 +172,8 @@ func InsertReporte(ctx context.Context, tx pgx.Tx, proyectoID, empresaID uuid.UU
 func InsertAlerta(ctx context.Context, tx pgx.Tx, analisisID, reporteID uuid.UUID, tipo, mensaje, severidad string) (uuid.UUID, error) {
 	id := uuid.New()
 	_, err := tx.Exec(ctx,
-		`INSERT INTO alertas (id, analisis_id, reporte_id, tipo, mensaje, severidad, creada_en)
-		 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+		`INSERT INTO alertas (id, analisis_id, reporte_id, tipo, mensaje, severidad, resuelta, creada_en)
+		 VALUES ($1, $2, $3, $4, $5, $6, false, NOW())`,
 		id, analisisID, reporteID, tipo, mensaje, severidad,
 	)
 	return id, err

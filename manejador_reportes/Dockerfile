@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN chmod +x entrypoint.sh entrypoint_worker.sh entrypoint_consumer.sh
+RUN sed -i 's/\r$//' entrypoint.sh entrypoint_worker.sh entrypoint_consumer.sh \
+    && chmod +x entrypoint.sh entrypoint_worker.sh entrypoint_consumer.sh
 
 EXPOSE 8003
 

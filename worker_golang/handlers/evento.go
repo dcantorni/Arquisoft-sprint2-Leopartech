@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,14 +33,13 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	// ── 1. Parse payload ────────────────────────────────────────────────────
 	var event map[string]interface{}
 	if err := json.Unmarshal(d.Body, &event); err != nil {
-		log.Printf("[evento] bad JSON: %v — nacking without requeue", err)
+		log.Printf("[ASR15][evento] bad JSON: %v — nacking without requeue", err)
 		_ = d.Nack(false, false)
 		return
 	}
 
 	eventoID := d.MessageId
 	if eventoID == "" {
-		// Fallback: use message body field or generate
 		if id, ok := event["evento_id"].(string); ok && id != "" {
 			eventoID = id
 		} else {
@@ -53,24 +53,28 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 		data = map[string]interface{}{}
 	}
 
+	log.Printf("[ASR15][evento] mensaje recibido: evento_id=%s tipo=%s routing_key=%s",
+		eventoID, tipoEvento, d.RoutingKey)
+	log.Printf("[ASR15][evento] inicio procesamiento: evento_id=%s", eventoID)
+
 	proyectoIDStr := stringField(data, "proyecto_id", "")
 	empresaIDStr := stringField(data, "empresa_id", "")
 
 	if proyectoIDStr == "" || empresaIDStr == "" {
-		log.Printf("[evento] missing proyecto_id/empresa_id in event %s — discarding", eventoID)
+		log.Printf("[ASR15][evento] missing proyecto_id/empresa_id in event %s — discarding", eventoID)
 		_ = d.Ack(false)
 		return
 	}
 
 	proyectoID, err := uuid.Parse(proyectoIDStr)
 	if err != nil {
-		log.Printf("[evento] invalid proyecto_id %q: %v — discarding", proyectoIDStr, err)
+		log.Printf("[ASR15][evento] invalid proyecto_id %q: %v — discarding", proyectoIDStr, err)
 		_ = d.Ack(false)
 		return
 	}
 	empresaID, err := uuid.Parse(empresaIDStr)
 	if err != nil {
-		log.Printf("[evento] invalid empresa_id %q: %v — discarding", empresaIDStr, err)
+		log.Printf("[ASR15][evento] invalid empresa_id %q: %v — discarding", empresaIDStr, err)
 		_ = d.Ack(false)
 		return
 	}
@@ -78,7 +82,7 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	// ── 2. Open transaction ─────────────────────────────────────────────────
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		log.Printf("[evento] pool.Begin: %v — requeuing", err)
+		log.Printf("[ASR15][evento] pool.Begin: %v — requeuing", err)
 		_ = d.Nack(false, true)
 		return
 	}
@@ -91,21 +95,20 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	// ── 3. Idempotency check ────────────────────────────────────────────────
 	already, err := db.IsAlreadyProcessed(ctx, tx, eventoID)
 	if err != nil {
-		log.Printf("[evento] idempotency check failed: %v", err)
+		log.Printf("[ASR15][evento] idempotency check failed: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
 	}
 	if already {
-		log.Printf("[evento] duplicate event %s — skipping", eventoID)
+		log.Printf("[ASR15][evento] duplicate event %s — skipping", eventoID)
 		_ = tx.Rollback(ctx)
 		_ = d.Ack(false)
 		return
 	}
 
-	// Register receipt
 	if _, err = db.InsertEventoEntrante(ctx, tx, eventoID, tipoEvento, d.Body); err != nil {
-		log.Printf("[evento] InsertEventoEntrante: %v", err)
+		log.Printf("[ASR15][evento] InsertEventoEntrante: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
@@ -115,7 +118,7 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	nombre := fmt.Sprintf("Análisis batch – %s – %s", tipoEvento, proyectoIDStr)
 	analisisID, err := db.InsertAnalisis(ctx, tx, proyectoID, empresaID, nombre, "COSTO")
 	if err != nil {
-		log.Printf("[evento] InsertAnalisis: %v", err)
+		log.Printf("[ASR15][evento] InsertAnalisis: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
@@ -124,23 +127,35 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	// ── 5. EjecucionAnalisis ────────────────────────────────────────────────
 	ejecucionID, err := db.InsertEjecucion(ctx, tx, analisisID)
 	if err != nil {
-		log.Printf("[evento] InsertEjecucion: %v", err)
+		log.Printf("[ASR15][evento] InsertEjecucion: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
+	}
+
+	// ASR15: simulate slow processing when SIMULATE_SLOW_PROCESSING=true
+	if os.Getenv("SIMULATE_SLOW_PROCESSING") == "true" {
+		log.Printf("[ASR15][evento] SIMULATE_SLOW_PROCESSING=true — sleeping 3s (evento_id=%s)", eventoID)
+		time.Sleep(3 * time.Second)
 	}
 
 	// ── 6. Reporte ──────────────────────────────────────────────────────────
 	hoy := time.Now().UTC()
 	periodoInicio := time.Date(hoy.Year(), hoy.Month(), 1, 0, 0, 0, 0, time.UTC)
 	periodoFin := hoy
+	reporteNombre := fmt.Sprintf("Reporte batch – %s", tipoEvento)
+	reporteTipo := reporteTipoForEvent(tipoEvento)
 	reporteDatos := map[string]interface{}{
 		"tipo_evento": tipoEvento,
 		"data":        data,
 	}
-	reporteID, err := db.InsertReporte(ctx, tx, proyectoID, empresaID, periodoInicio, periodoFin, reporteDatos)
+	reporteID, err := db.InsertReporte(
+		ctx, tx, proyectoID, empresaID,
+		reporteNombre, reporteTipo,
+		periodoInicio, periodoFin, reporteDatos,
+	)
 	if err != nil {
-		log.Printf("[evento] InsertReporte: %v", err)
+		log.Printf("[ASR15][evento] InsertReporte: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
@@ -150,40 +165,41 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	alertaMensaje := fmt.Sprintf("Evento batch procesado: %s para proyecto %s", tipoEvento, proyectoIDStr)
 	alertaID, err := db.InsertAlerta(ctx, tx, analisisID, reporteID, "ANOMALIA", alertaMensaje, "BAJA")
 	if err != nil {
-		log.Printf("[evento] InsertAlerta: %v", err)
+		log.Printf("[ASR15][evento] InsertAlerta: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
 	}
 
-	// Mark as processed inside the same transaction
 	if err = db.MarkEventoProcessed(ctx, tx, eventoID); err != nil {
-		log.Printf("[evento] MarkEventoProcessed: %v", err)
+		log.Printf("[ASR15][evento] MarkEventoProcessed: %v", err)
 		_ = tx.Rollback(ctx)
 		_ = d.Nack(false, true)
 		return
 	}
 
 	if err = tx.Commit(ctx); err != nil {
-		log.Printf("[evento] tx.Commit: %v", err)
+		log.Printf("[ASR15][evento] tx.Commit: %v", err)
 		_ = d.Nack(false, true)
 		return
 	}
 
 	duracionMs := time.Since(start).Milliseconds()
+	log.Printf("[ASR15][evento] commit exitoso: evento_id=%s duracion_total=%d ms", eventoID, duracionMs)
 
 	// ── 8. Post-commit: update ejecucion duration ───────────────────────────
 	resultado := map[string]interface{}{"status": "ok", "tipo": tipoEvento}
 	if dbErr := db.CompleteEjecucion(ctx, pool, ejecucionID, duracionMs, resultado); dbErr != nil {
-		log.Printf("[evento] CompleteEjecucion: %v (non-fatal)", dbErr)
+		log.Printf("[ASR15][evento] CompleteEjecucion: %v (non-fatal)", dbErr)
 	}
 	if dbErr := db.CompleteAnalisis(ctx, pool, analisisID); dbErr != nil {
-		log.Printf("[evento] CompleteAnalisis: %v (non-fatal)", dbErr)
+		log.Printf("[ASR15][evento] CompleteAnalisis: %v (non-fatal)", dbErr)
 	}
 
 	// ── 9. Notificacion if slow ─────────────────────────────────────────────
 	if duracionMs > 2000 {
-		ejecucionRef := ejecucionID // copy for pointer
+		log.Printf("[ASR15][evento] análisis lento detectado: duracion=%d ms (umbral=2000 ms)", duracionMs)
+		ejecucionRef := ejecucionID
 		notif := models.Notificacion{
 			EjecucionAnalisisID: &ejecucionRef,
 			UsuarioID:           empresaID,
@@ -195,18 +211,29 @@ func HandleEvento(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 				nombre, duracionMs, reporteID,
 			),
 		}
-		if _, notifErr := db.InsertNotificacion(ctx, pool, notif); notifErr != nil {
-			log.Printf("[evento] InsertNotificacion: %v (non-fatal)", notifErr)
+		notifID, notifErr := db.InsertNotificacion(ctx, pool, notif)
+		if notifErr != nil {
+			log.Printf("[ASR15][evento] InsertNotificacion: %v (non-fatal)", notifErr)
 		} else {
-			log.Printf("[evento] notificacion emitida por análisis lento: %d ms", duracionMs)
+			log.Printf("[ASR15][evento] notificación creada: id=%s ejecucion=%s duracion=%d ms",
+				notifID, ejecucionID, duracionMs)
 		}
 	}
 
 	log.Printf(
-		"[evento] persisted: tipo=%s proyecto=%s analisis=%s reporte=%s alerta=%s duracion=%d ms",
+		"[ASR15][evento] persisted: tipo=%s proyecto=%s analisis=%s reporte=%s alerta=%s duracion=%d ms",
 		tipoEvento, proyectoIDStr, analisisID, reporteID, alertaID, duracionMs,
 	)
 	_ = d.Ack(false)
+}
+
+func reporteTipoForEvent(tipoEvento string) string {
+	switch tipoEvento {
+	case "reporte_solicitado":
+		return "MENSUAL"
+	default:
+		return "PROYECTO"
+	}
 }
 
 // stringField safely reads a string value from a map.

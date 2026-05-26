@@ -337,6 +337,8 @@ services:
       DATABASE_MAX_CONNS: "20"
       WORKER_CONCURRENCY: "10"
       PORT: "8006"
+      # Set to "true" to simulate ASR15 slow analysis (>2s) for demos/tests
+      SIMULATE_SLOW_PROCESSING: "false"
     depends_on:
       postgres_reportes:
         condition: service_healthy

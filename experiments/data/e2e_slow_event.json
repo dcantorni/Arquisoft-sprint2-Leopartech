@@ -1,0 +1,14 @@
+{
+  "events": [
+    {
+      "tipo": "reporte_solicitado",
+      "evento_id": "e2e-test-slow-001",
+      "data": {
+        "proyecto_id": "aaaaaaaa-0001-0001-0001-000000000098",
+        "empresa_id": "550e8400-e29b-41d4-a716-446655440001",
+        "periodo_inicio": "2025-01-01",
+        "periodo_fin": "2025-01-31"
+      }
+    }
+  ]
+}

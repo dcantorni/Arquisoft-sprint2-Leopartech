@@ -40,7 +40,10 @@ func HandleProyecto(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 		}
 	}
 
-	tipoEvento := stringField(event, "tipo", "proyecto.unknown")
+	tipoEvento := stringField(event, "tipo", "")
+	if tipoEvento == "" {
+		tipoEvento = stringField(event, "evento", "proyecto.unknown")
+	}
 	data, _ := event["data"].(map[string]interface{})
 	if data == nil {
 		data = map[string]interface{}{}
@@ -145,6 +148,9 @@ func HandleProyecto(ctx context.Context, pool *pgxpool.Pool, d amqp.Delivery) {
 	resultado := map[string]interface{}{"status": "ok", "tipo": tipoEvento}
 	if dbErr := db.CompleteEjecucion(ctx, pool, ejecucionID, duracionMs, resultado); dbErr != nil {
 		log.Printf("[proyecto] CompleteEjecucion: %v (non-fatal)", dbErr)
+	}
+	if dbErr := db.CompleteAnalisis(ctx, pool, analisisID); dbErr != nil {
+		log.Printf("[proyecto] CompleteAnalisis: %v (non-fatal)", dbErr)
 	}
 
 	log.Printf(
