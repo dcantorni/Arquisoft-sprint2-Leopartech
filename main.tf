@@ -180,23 +180,21 @@ resource "aws_security_group" "ssh" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-ssh" })
 }
 
-# CHANGE 1 – Internal ALB security group.
-# The single internet-facing ALB is gone; this SG is now assigned to the two
-# internal ALBs (usuarios + reportes). They only need to accept HTTP on port 80
-# from within the VPC (API Gateway → VPC-internal traffic).
-# The existing aws_security_group.app ingress rules still reference this SG id,
-# so keeping the same resource name avoids any plan-level destroy.
+# CHANGE 6 – Single public-facing ALB replaces API Gateway + internal ALBs.
+# This SG now serves the single internet-facing ALB. HTTP from 0.0.0.0/0 so
+# the S3-hosted frontend and external clients can reach it.
+# The existing aws_security_group.app ingress rules still reference this SG id.
 resource "aws_security_group" "alb" {
   name        = "${var.project_prefix}-alb"
-  description = "Internal ALBs - HTTP ingress from VPC only"
+  description = "Public ALB - HTTP ingress from internet"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "HTTP from VPC (internal ALBs for usuarios and reportes)"
+    description = "HTTP from internet (public ALB)"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = [data.aws_vpc.default.cidr_block]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -224,7 +222,15 @@ resource "aws_security_group" "app" {
   }
 
   ingress {
-    description = "manejador_cloud - internal VPC only (no ALB)"
+    description     = "manejador_cloud from ALB (CHANGE 6)"
+    from_port       = 8002
+    to_port         = 8002
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
+    description = "manejador_cloud from VPC (inter-service calls)"
     from_port   = 8002
     to_port     = 8002
     protocol    = "tcp"
@@ -373,6 +379,14 @@ resource "aws_security_group" "auth" {
     to_port     = 8004
     protocol    = "tcp"
     cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  ingress {
+    description     = "manejador_seguridad from ALB (CHANGE 6)"
+    from_port       = 8005
+    to_port         = 8005
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
   ingress {
@@ -886,31 +900,29 @@ resource "aws_instance" "manejador_seguridad" {
 }
 
 # -----------------------------------------------------------------------------
-# CHANGE 1 — INTERNAL ALBs
-# Two internal (non-internet-facing) ALBs replace the single public ALB.
-# Traffic arrives via API Gateway HTTP integrations using the ALB DNS names.
-# Both use aws_security_group.alb so existing aws_security_group.app ingress
-# rules (which reference alb SG id) keep working without modification.
+# CHANGE 6 — SINGLE PUBLIC ALB (replaces API Gateway + two internal ALBs)
+#
+# One internet-facing ALB serves as the single entry point.
+# Path-based listener rules route each prefix to its target group:
+#   /auth/*      → TG autenticacion  :8004  (EC2, attached below)
+#   /security/*  → TG seguridad      :8005  (EC2, attached below)
+#   /cloud/*     → TG cloud          :8002  (EC2, attached below)
+#   /projects/*  → TG usuarios       :8001  (ASG auto-registers)
+#   /events/*    → TG reportes       :8003  (ASG auto-registers)
+#   /reports/*   → TG reportes       :8003  (ASG auto-registers)
+#
+# The ALB lives inside the VPC so it can reach all private IPs directly —
+# no VPC Link, no public-IP workaround needed.
 # -----------------------------------------------------------------------------
 
-resource "aws_lb" "usuarios" {
-  name               = "${var.project_prefix}-alb-usuarios"
-  internal           = true
+resource "aws_lb" "main" {
+  name               = "${var.project_prefix}-alb"
+  internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = tolist(data.aws_subnets.default.ids)
 
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb-usuarios" })
-}
-
-resource "aws_lb" "reportes" {
-  name               = "${var.project_prefix}-alb-reportes"
-  internal           = true
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = tolist(data.aws_subnets.default.ids)
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb-reportes" })
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb" })
 }
 
 # Target group for manejador_usuarios - ASR16 latency experiment
@@ -953,26 +965,175 @@ resource "aws_lb_target_group" "reportes" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-reportes" })
 }
 
-# HTTP listeners on the internal ALBs — port 80, forward to target groups
-resource "aws_lb_listener" "usuarios" {
-  load_balancer_arn = aws_lb.usuarios.arn
+# ── Target groups for the 3 fixed EC2 services (no ASG) ───────────────────
+
+resource "aws_lb_target_group" "autenticacion" {
+  name     = "${var.project_prefix}-tg-auth"
+  port     = 8004
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-auth" })
+}
+
+resource "aws_lb_target_group" "seguridad" {
+  name     = "${var.project_prefix}-tg-security"
+  port     = 8005
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-security" })
+}
+
+resource "aws_lb_target_group" "cloud" {
+  name     = "${var.project_prefix}-tg-cloud"
+  port     = 8002
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-cloud" })
+}
+
+# Attach the fixed EC2 instances to their target groups
+resource "aws_lb_target_group_attachment" "autenticacion" {
+  target_group_arn = aws_lb_target_group.autenticacion.arn
+  target_id        = aws_instance.manejador_autenticacion.id
+  port             = 8004
+}
+
+resource "aws_lb_target_group_attachment" "seguridad" {
+  target_group_arn = aws_lb_target_group.seguridad.arn
+  target_id        = aws_instance.manejador_seguridad.id
+  port             = 8005
+}
+
+resource "aws_lb_target_group_attachment" "cloud" {
+  target_group_arn = aws_lb_target_group.cloud.arn
+  target_id        = aws_instance.manejador_cloud.id
+  port             = 8002
+}
+
+# ── Main listener: port 80, default → 404 ─────────────────────────────────
+
+resource "aws_lb_listener" "main" {
+  load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.usuarios.arn
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Not found"
+      status_code  = "404"
+    }
   }
 }
 
-resource "aws_lb_listener" "reportes" {
-  load_balancer_arn = aws_lb.reportes.arn
-  port              = 80
-  protocol          = "HTTP"
+# ── Listener rules: path-based routing ────────────────────────────────────
 
-  default_action {
+resource "aws_lb_listener_rule" "auth" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.autenticacion.arn
+  }
+  condition {
+    path_pattern { values = ["/auth/*", "/auth"] }
+  }
+}
+
+resource "aws_lb_listener_rule" "security" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 20
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.seguridad.arn
+  }
+  condition {
+    path_pattern { values = ["/security/*", "/security"] }
+  }
+}
+
+resource "aws_lb_listener_rule" "cloud" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 30
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.cloud.arn
+  }
+  condition {
+    path_pattern { values = ["/cloud/*", "/cloud"] }
+  }
+}
+
+resource "aws_lb_listener_rule" "projects" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 40
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.usuarios.arn
+  }
+  condition {
+    path_pattern { values = ["/projects/*", "/projects"] }
+  }
+}
+
+resource "aws_lb_listener_rule" "events" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 50
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.reportes.arn
+  }
+  condition {
+    path_pattern { values = ["/events/*", "/events"] }
+  }
+}
+
+resource "aws_lb_listener_rule" "reports" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 60
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.reportes.arn
+  }
+  condition {
+    path_pattern { values = ["/reports/*", "/reports"] }
   }
 }
 
@@ -1328,283 +1489,10 @@ resource "aws_cloudwatch_metric_alarm" "reportes_cpu_low" {
 }
 
 # -----------------------------------------------------------------------------
-# CHANGE 1 — API GATEWAY REST API
-# Single entry point for all frontend traffic. Replaces the old internet-facing
-# ALB. Each route uses an HTTP_PROXY integration:
-#   /auth/*      → manejador_autenticacion private IP :8004
-#   /security/*  → manejador_seguridad private IP :8005
-#   /cloud/*     → manejador_cloud private IP :8002
-#   /projects/*  → alb_usuarios (internal) :80
-#   /events/*    → alb_reportes (internal) :80
-#   /reports/*   → alb_reportes (internal) :80
+# CHANGE 6 — API Gateway removed.
+# Routing is now handled by aws_lb.main (public ALB) with path-based rules.
+# See the ALB + listener rules section above.
 # -----------------------------------------------------------------------------
-
-resource "aws_api_gateway_rest_api" "bite" {
-  name        = "${var.project_prefix}-api"
-  description = "BITE.co API Gateway - routes all service traffic"
-
-  endpoint_configuration {
-    types = ["REGIONAL"]
-  }
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-api" })
-}
-
-# ── /auth ──────────────────────────────────────────────────────────────────
-
-resource "aws_api_gateway_resource" "auth_parent" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
-  path_part   = "auth"
-}
-
-resource "aws_api_gateway_resource" "auth_proxy" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_resource.auth_parent.id
-  path_part   = "{proxy+}"
-}
-
-resource "aws_api_gateway_method" "auth" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  resource_id   = aws_api_gateway_resource.auth_proxy.id
-  http_method   = "ANY"
-  authorization = "NONE"
-
-  request_parameters = {
-    "method.request.path.proxy" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "auth" {
-  rest_api_id             = aws_api_gateway_rest_api.bite.id
-  resource_id             = aws_api_gateway_resource.auth_proxy.id
-  http_method             = aws_api_gateway_method.auth.http_method
-  integration_http_method = "ANY"
-  type                    = "HTTP_PROXY"
-  uri                     = "http://${aws_instance.manejador_autenticacion.private_ip}:8004/auth/{proxy}"
-
-  request_parameters = {
-    "integration.request.path.proxy" = "method.request.path.proxy"
-  }
-}
-
-# ── /security ─────────────────────────────────────────────────────────────
-
-resource "aws_api_gateway_resource" "security_parent" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
-  path_part   = "security"
-}
-
-resource "aws_api_gateway_resource" "security_proxy" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_resource.security_parent.id
-  path_part   = "{proxy+}"
-}
-
-resource "aws_api_gateway_method" "security" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  resource_id   = aws_api_gateway_resource.security_proxy.id
-  http_method   = "ANY"
-  authorization = "NONE"
-
-  request_parameters = {
-    "method.request.path.proxy" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "security" {
-  rest_api_id             = aws_api_gateway_rest_api.bite.id
-  resource_id             = aws_api_gateway_resource.security_proxy.id
-  http_method             = aws_api_gateway_method.security.http_method
-  integration_http_method = "ANY"
-  type                    = "HTTP_PROXY"
-  uri                     = "http://${aws_instance.manejador_seguridad.private_ip}:8005/security/{proxy}"
-
-  request_parameters = {
-    "integration.request.path.proxy" = "method.request.path.proxy"
-  }
-}
-
-# ── /cloud ────────────────────────────────────────────────────────────────
-
-resource "aws_api_gateway_resource" "cloud_parent" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
-  path_part   = "cloud"
-}
-
-resource "aws_api_gateway_resource" "cloud_proxy" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_resource.cloud_parent.id
-  path_part   = "{proxy+}"
-}
-
-resource "aws_api_gateway_method" "cloud" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  resource_id   = aws_api_gateway_resource.cloud_proxy.id
-  http_method   = "ANY"
-  authorization = "NONE"
-
-  request_parameters = {
-    "method.request.path.proxy" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "cloud" {
-  rest_api_id             = aws_api_gateway_rest_api.bite.id
-  resource_id             = aws_api_gateway_resource.cloud_proxy.id
-  http_method             = aws_api_gateway_method.cloud.http_method
-  integration_http_method = "ANY"
-  type                    = "HTTP_PROXY"
-  uri                     = "http://${aws_instance.manejador_cloud.private_ip}:8002/cloud/{proxy}"
-
-  request_parameters = {
-    "integration.request.path.proxy" = "method.request.path.proxy"
-  }
-}
-
-# ── /projects ─────────────────────────────────────────────────────────────
-
-resource "aws_api_gateway_resource" "projects_parent" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
-  path_part   = "projects"
-}
-
-resource "aws_api_gateway_resource" "projects_proxy" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_resource.projects_parent.id
-  path_part   = "{proxy+}"
-}
-
-resource "aws_api_gateway_method" "projects" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  resource_id   = aws_api_gateway_resource.projects_proxy.id
-  http_method   = "ANY"
-  authorization = "NONE"
-
-  request_parameters = {
-    "method.request.path.proxy" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "projects" {
-  rest_api_id             = aws_api_gateway_rest_api.bite.id
-  resource_id             = aws_api_gateway_resource.projects_proxy.id
-  http_method             = aws_api_gateway_method.projects.http_method
-  integration_http_method = "ANY"
-  type                    = "HTTP_PROXY"
-  uri                     = "http://${aws_lb.usuarios.dns_name}/projects/{proxy}"
-
-  request_parameters = {
-    "integration.request.path.proxy" = "method.request.path.proxy"
-  }
-}
-
-# ── /events ───────────────────────────────────────────────────────────────
-
-resource "aws_api_gateway_resource" "events_parent" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
-  path_part   = "events"
-}
-
-resource "aws_api_gateway_resource" "events_proxy" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_resource.events_parent.id
-  path_part   = "{proxy+}"
-}
-
-resource "aws_api_gateway_method" "events" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  resource_id   = aws_api_gateway_resource.events_proxy.id
-  http_method   = "ANY"
-  authorization = "NONE"
-
-  request_parameters = {
-    "method.request.path.proxy" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "events" {
-  rest_api_id             = aws_api_gateway_rest_api.bite.id
-  resource_id             = aws_api_gateway_resource.events_proxy.id
-  http_method             = aws_api_gateway_method.events.http_method
-  integration_http_method = "ANY"
-  type                    = "HTTP_PROXY"
-  uri                     = "http://${aws_lb.reportes.dns_name}/events/{proxy}"
-
-  request_parameters = {
-    "integration.request.path.proxy" = "method.request.path.proxy"
-  }
-}
-
-# ── /reports ──────────────────────────────────────────────────────────────
-
-resource "aws_api_gateway_resource" "reports_parent" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
-  path_part   = "reports"
-}
-
-resource "aws_api_gateway_resource" "reports_proxy" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-  parent_id   = aws_api_gateway_resource.reports_parent.id
-  path_part   = "{proxy+}"
-}
-
-resource "aws_api_gateway_method" "reports" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  resource_id   = aws_api_gateway_resource.reports_proxy.id
-  http_method   = "ANY"
-  authorization = "NONE"
-
-  request_parameters = {
-    "method.request.path.proxy" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "reports" {
-  rest_api_id             = aws_api_gateway_rest_api.bite.id
-  resource_id             = aws_api_gateway_resource.reports_proxy.id
-  http_method             = aws_api_gateway_method.reports.http_method
-  integration_http_method = "ANY"
-  type                    = "HTTP_PROXY"
-  uri                     = "http://${aws_lb.reportes.dns_name}/reports/{proxy}"
-
-  request_parameters = {
-    "integration.request.path.proxy" = "method.request.path.proxy"
-  }
-}
-
-# ── Deployment & Stage ────────────────────────────────────────────────────
-
-resource "aws_api_gateway_deployment" "bite" {
-  rest_api_id = aws_api_gateway_rest_api.bite.id
-
-  # Must depend on all integrations so the deployment captures every route
-  depends_on = [
-    aws_api_gateway_integration.auth,
-    aws_api_gateway_integration.security,
-    aws_api_gateway_integration.cloud,
-    aws_api_gateway_integration.projects,
-    aws_api_gateway_integration.events,
-    aws_api_gateway_integration.reports,
-  ]
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_api_gateway_stage" "prod" {
-  rest_api_id   = aws_api_gateway_rest_api.bite.id
-  deployment_id = aws_api_gateway_deployment.bite.id
-  stage_name    = "prod"
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-api-stage-prod" })
-}
 
 # -----------------------------------------------------------------------------
 # COGNITO USER POOL (ASR3 – Tenant Identity) — UNCHANGED
@@ -1747,9 +1635,8 @@ resource "null_resource" "confirm_empresa_b" {
 
 # -----------------------------------------------------------------------------
 # S3 FRONTEND BUCKET — static HTML/CSS/JS site
-# CHANGE 1: config.js now points to the API Gateway invoke URL instead of ALB.
-#           The template variable remains "alb_dns" but receives the APIGW host
-#           so all CONFIG.* entries in config.js resolve to https://<apigw-host>.
+# CHANGE 6: config.js points to the public ALB DNS (HTTP).
+#           config.js.tpl uses ${alb_dns} → rendered to http://<alb-dns>.
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "frontend" {
@@ -1785,14 +1672,13 @@ resource "aws_s3_bucket_policy" "frontend_public" {
   depends_on = [aws_s3_bucket_public_access_block.frontend]
 }
 
-# FIX 3: variable renamed from alb_dns → api_gw_url to match config.js.tpl
-# (config.js.tpl was updated in PROMPT 4 to use ${api_gw_url})
+# CHANGE 6: variable changed from api_gw_url → alb_dns (public ALB DNS name)
 resource "aws_s3_object" "frontend_config" {
   bucket       = aws_s3_bucket.frontend.id
   key          = "config.js"
   content_type = "application/javascript"
   content = templatefile("${path.module}/frontend/config.js.tpl", {
-    api_gw_url = trimprefix(aws_api_gateway_stage.prod.invoke_url, "https://")
+    alb_dns = aws_lb.main.dns_name
   })
   depends_on = [
     aws_s3_bucket_public_access_block.frontend,
@@ -1934,37 +1820,19 @@ resource "aws_lambda_permission" "allow_eventbridge" {
 #              cloud_read_replica_endpoint, rds_primary_endpoint
 # -----------------------------------------------------------------------------
 
-output "api_gateway_invoke_url" {
-  description = "API Gateway invoke URL — base URL for all frontend calls (CHANGE 1)"
-  value       = aws_api_gateway_stage.prod.invoke_url
-}
-
-output "alb_usuarios_dns" {
-  description = "Internal ALB DNS for manejador_usuarios (CHANGE 1)"
-  value       = aws_lb.usuarios.dns_name
-}
-
-output "alb_reportes_dns" {
-  description = "Internal ALB DNS for manejador_reportes (CHANGE 1)"
-  value       = aws_lb.reportes.dns_name
-}
-
-# Replaces old alb_dns_name (was aws_lb.main.dns_name)
 output "alb_dns_name" {
-  description = "API Gateway invoke URL (replaces single ALB DNS - CHANGE 1)"
-  value       = aws_api_gateway_stage.prod.invoke_url
+  description = "Public ALB DNS — base URL for all frontend and JMeter calls (CHANGE 6)"
+  value       = "http://${aws_lb.main.dns_name}"
 }
 
-# Replaces old alb_usuarios_url (was https://<alb>/projects)
 output "alb_usuarios_url" {
-  description = "ASR16 latency experiment endpoint via API Gateway"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/projects"
+  description = "ASR16 latency experiment endpoint via public ALB"
+  value       = "http://${aws_lb.main.dns_name}/projects"
 }
 
-# Replaces old alb_reportes_url (was https://<alb>/events/batch)
 output "alb_reportes_url" {
-  description = "ASR17 scalability experiment endpoint via API Gateway"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/events/batch"
+  description = "ASR17 scalability experiment endpoint via public ALB"
+  value       = "http://${aws_lb.main.dns_name}/events/batch"
 }
 
 output "manejador_cloud_public_ip" {
@@ -2032,31 +1900,29 @@ output "manejador_seguridad_public_ip" {
   value       = aws_instance.manejador_seguridad.public_ip
 }
 
-# Replaces old alb_auth_url (was http://<alb>/auth/login)
 output "alb_auth_url" {
-  description = "ASR2/ASR3 auth endpoint via API Gateway"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/auth/login"
+  description = "ASR2/ASR3 auth endpoint via public ALB (CHANGE 6)"
+  value       = "http://${aws_lb.main.dns_name}/auth/login"
 }
 
-# ASR2 – security endpoints now route through API Gateway instead of the old ALB
 output "asr2_tls_status_url_http" {
-  description = "ASR2 experiment: security/tls-status via API Gateway"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/tls-status"
+  description = "ASR2 experiment: security/tls-status via public ALB (CHANGE 6)"
+  value       = "http://${aws_lb.main.dns_name}/security/tls-status"
 }
 
 output "asr2_tls_status_url_https" {
-  description = "ASR2 experiment: security/tls-status via API Gateway (HTTPS)"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/tls-status"
+  description = "ASR2 experiment: security/tls-status via public ALB (CHANGE 6)"
+  value       = "http://${aws_lb.main.dns_name}/security/tls-status"
 }
 
 output "asr2_integrity_check_url" {
-  description = "ASR2 experiment: HMAC integrity check endpoint via API Gateway"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/integrity-check"
+  description = "ASR2 experiment: HMAC integrity check endpoint via public ALB (CHANGE 6)"
+  value       = "http://${aws_lb.main.dns_name}/security/integrity-check"
 }
 
 output "asr2_integrity_log_url" {
-  description = "ASR2 experiment: audit log for all TLS/integrity checks via API Gateway"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/integrity-log"
+  description = "ASR2 experiment: audit log via public ALB (CHANGE 6)"
+  value       = "http://${aws_lb.main.dns_name}/security/integrity-log"
 }
 
 output "cognito_test_users" {
