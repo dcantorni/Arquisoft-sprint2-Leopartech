@@ -4,11 +4,20 @@
 #
 # Architecture reference: architecture.md §3 Deployment Architecture
 # Experiments:
-#   - ASR16 (Latencia)    → ALB → manejador_usuarios → POST /projects
-#   - ASR17 (Escalabilidad) → ALB → manejador_reportes → POST /events/batch
+#   - ASR16 (Latencia)    → API Gateway → ALB usuarios → manejador_usuarios → POST /projects
+#   - ASR17 (Escalabilidad) → API Gateway → ALB reportes → manejador_reportes → POST /events/batch
 #                              → RabbitMQ → Worker Pool (Celery)
+#   - ASR2  (Integridad)  → API Gateway → manejador_seguridad → /security/*
+#   - ASR3  (Seguridad)   → API Gateway → manejador_autenticacion → /auth/*
 #
 # Instance sizing: t3.micro / t3.small (cheapest viable for AWS Academy)
+#
+# CHANGE LOG (refactor):
+#   CHANGE 1 — Replaced single ALB with API Gateway + 2 internal ALBs
+#   CHANGE 2 — manejador_usuarios and manejador_reportes now run in ASGs
+#   CHANGE 3 — Added RDS read replica for cloud_db (CQRS read path)
+#   CHANGE 4 — Redis restricted to manejador_autenticacion + manejador_cloud only
+#   CHANGE 5 — Added Lambda cloud_collector + EventBridge schedule
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -79,8 +88,8 @@ provider "aws" {
   region = var.region
 }
 
-# ASR2 – TLS provider for generating self-signed certificate
-provider "tls" {}
+# CHANGE 5 – archive provider needed for Lambda zip packaging
+provider "archive" {}
 
 
 data "aws_vpc" "default" {
@@ -171,28 +180,23 @@ resource "aws_security_group" "ssh" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-ssh" })
 }
 
-# ALB security group - accepts HTTP and HTTPS from anywhere
-# ASR2: port 443 required for TLS experiment evidence
+# CHANGE 1 – Internal ALB security group.
+# The single internet-facing ALB is gone; this SG is now assigned to the two
+# internal ALBs (usuarios + reportes). They only need to accept HTTP on port 80
+# from within the VPC (API Gateway → VPC-internal traffic).
+# The existing aws_security_group.app ingress rules still reference this SG id,
+# so keeping the same resource name avoids any plan-level destroy.
 resource "aws_security_group" "alb" {
   name        = "${var.project_prefix}-alb"
-  description = "Application Load Balancer - public HTTP and HTTPS ingress"
+  description = "Internal ALBs - HTTP ingress from VPC only"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "HTTP from Internet"
+    description = "HTTP from VPC (internal ALBs for usuarios and reportes)"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # ASR2 – Integridad: HTTPS/TLS ingress
-  ingress {
-    description = "HTTPS/TLS from Internet (ASR2 integrity experiment)"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
   }
 
   egress {
@@ -205,7 +209,7 @@ resource "aws_security_group" "alb" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb" })
 }
 
-# App servers - only accept traffic from the ALB and SSH
+# App servers - only accept traffic from the ALB SG and SSH
 resource "aws_security_group" "app" {
   name        = "${var.project_prefix}-app"
   description = "Django app servers - accepts from ALB only"
@@ -349,10 +353,76 @@ resource "aws_security_group" "worker" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-worker" })
 }
 
+# Auth services SG - ports 8004 (autenticacion) and 8005 (seguridad)
+resource "aws_security_group" "auth" {
+  name        = "${var.project_prefix}-auth"
+  description = "Auth services (manejador_autenticacion + manejador_seguridad)"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description     = "manejador_autenticacion from ALB"
+    from_port       = 8004
+    to_port         = 8004
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
+    description = "manejador_autenticacion from VPC (inter-service)"
+    from_port   = 8004
+    to_port     = 8004
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  ingress {
+    description = "manejador_seguridad from VPC (inter-service)"
+    from_port   = 8005
+    to_port     = 8005
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-auth" })
+}
+
+# CHANGE 5 – Lambda security group: egress-only (Lambda needs to reach RDS and Redis)
+resource "aws_security_group" "lambda" {
+  name        = "${var.project_prefix}-lambda"
+  description = "Lambda functions - egress only, reaches RDS and Redis inside VPC"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-lambda" })
+}
+
 # -----------------------------------------------------------------------------
 # SHARED INFRASTRUCTURE
 # architecture.md §3.5 - Redis (Elasticache) + RabbitMQ (AMQP)
 # Using EC2 for AWS Academy compatibility (Elasticache requires VPC config)
+# CHANGE 4: Redis is now used ONLY by manejador_autenticacion (db 0) and
+#           manejador_cloud (db 1). All other services no longer reference it.
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "redis" {
@@ -463,105 +533,37 @@ resource "aws_db_instance" "main" {
   })
 }
 
-# -----------------------------------------------------------------------------
-# APPLICATION SERVERS
-# architecture.md §3.3 - Django services on Ubuntu 22.04
-# -----------------------------------------------------------------------------
-
-resource "aws_instance" "manejador_usuarios" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type_app
-  subnet_id                   = element(tolist(data.aws_subnets.default.ids), 0)
-  associate_public_ip_address = true
-  vpc_security_group_ids      = [aws_security_group.app.id, aws_security_group.ssh.id]
-
-
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp3"
-  }
-
-  # Depends on all infra - user_data waits with nc before starting the service
-  depends_on = [
-    aws_db_instance.main,
-    aws_instance.redis,
-    aws_instance.rabbitmq,
-    aws_instance.manejador_cloud,
-    aws_instance.manejador_autenticacion,
-  ]
-
-  user_data = <<-EOT
-    #!/bin/bash
-    set -euxo pipefail
-    export DEBIAN_FRONTEND=noninteractive
-
-    # Environment - mirrors docker-compose env vars exactly
-    sudo tee /etc/environment <<ENV
-    DATABASE_HOST=${aws_db_instance.main.address}
-    DATABASE_PORT=5432
-    DATABASE_NAME=usuarios_db
-    DATABASE_USER=usuarios_user
-    DATABASE_PASSWORD=Usuarios_2024!
-    REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
-    RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
-    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
-    AUTH_SERVICE_TIMEOUT=10
-    ALLOWED_HOSTS=*
-    DEBUG=True
-    SECRET_KEY=bite-terraform-secret-key
-    EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
-    ENV
-
-    export DATABASE_HOST=${aws_db_instance.main.address}
-    export DATABASE_PORT=5432
-    export DATABASE_NAME=usuarios_db
-    export DATABASE_USER=usuarios_user
-    export DATABASE_PASSWORD='Usuarios_2024!'
-    export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
-    export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
-    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
-    export AUTH_SERVICE_TIMEOUT=10
-    export ALLOWED_HOSTS=*
-    export DEBUG=True
-    export SECRET_KEY=bite-terraform-secret-key
-
-    sudo apt-get install -y postgresql-client
-
-    ${local.git_bootstrap}
-
-    # Wait for RDS and other dependencies
-    until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
-    until nc -z ${aws_instance.redis.private_ip} 6379; do sleep 5; done
-    until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
-    until nc -z ${aws_instance.manejador_cloud.private_ip} 8002; do sleep 5; done
-    until nc -z ${aws_instance.manejador_autenticacion.private_ip} 8004; do sleep 5; done
-
-    # Create per-service DB and user using master credentials
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
-      -c "CREATE DATABASE usuarios_db;" || true
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
-      -c "CREATE USER usuarios_user WITH PASSWORD 'Usuarios_2024!';" || true
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
-      -c "GRANT ALL PRIVILEGES ON DATABASE usuarios_db TO usuarios_user;" || true
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d usuarios_db \
-      -c "GRANT ALL ON SCHEMA public TO usuarios_user;" || true
-
-    cd ${local.repo_dir}/manejador_usuarios
-    sudo python3 -m pip install -r requirements.txt
-    python3 manage.py migrate --noinput || true
-    python3 manage.py seed_usuarios_data || true
-    nohup python3 manage.py runserver 0.0.0.0:8001 > /var/log/manejador_usuarios.log 2>&1 &
-  EOT
+# CHANGE 3 — CQRS read replica for cloud_db reads.
+# manejador_cloud reads from DATABASE_READ_HOST (this replica).
+# Lambda cloud_collector writes to DATABASE_HOST (primary).
+#
+# NOTE: RDS read replicas require backup_retention_period >= 1 on the source.
+# If terraform apply fails with "must have automated backups enabled", run:
+#   aws rds modify-db-instance --db-instance-identifier <primary-id> \
+#     --backup-retention-period 1 --apply-immediately
+resource "aws_db_instance" "cloud_read_replica" {
+  identifier             = "${var.project_prefix}-cloud-read-replica"
+  replicate_source_db    = aws_db_instance.main.identifier
+  instance_class         = "db.t3.micro"
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+  vpc_security_group_ids = [aws_security_group.db.id]
 
   tags = merge(local.common_tags, {
-    Name    = "${var.project_prefix}-manejador-usuarios"
-    Role    = "app-server"
-    Service = "usuarios"
+    Name = "${var.project_prefix}-cloud-read-replica"
+    Role = "read-replica"
   })
 }
 
+# -----------------------------------------------------------------------------
+# APPLICATION SERVERS (fixed EC2 instances — no ASG)
+# manejador_usuarios and manejador_reportes moved to ASGs below (CHANGE 2).
+# manejador_cloud, manejador_autenticacion, manejador_seguridad stay as EC2.
+# -----------------------------------------------------------------------------
+
+# CHANGE 3 + CHANGE 4:
+#   - Added DATABASE_READ_HOST pointing to cloud read replica (CQRS read path)
+#   - Kept REDIS_URL=redis://...:/1 (manejador_cloud is one of the two allowed Redis users)
 resource "aws_instance" "manejador_cloud" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type_app
@@ -587,6 +589,7 @@ resource "aws_instance" "manejador_cloud" {
 
     sudo tee /etc/environment <<ENV
     DATABASE_HOST=${aws_db_instance.main.address}
+    DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
     DATABASE_PORT=5432
     DATABASE_NAME=cloud_db
     DATABASE_USER=cloud_user
@@ -598,6 +601,7 @@ resource "aws_instance" "manejador_cloud" {
     ENV
 
     export DATABASE_HOST=${aws_db_instance.main.address}
+    export DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
     export DATABASE_PORT=5432
     export DATABASE_NAME=cloud_db
     export DATABASE_USER=cloud_user
@@ -638,94 +642,11 @@ resource "aws_instance" "manejador_cloud" {
   })
 }
 
-resource "aws_instance" "manejador_reportes" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type_app
-  subnet_id                   = element(tolist(data.aws_subnets.default.ids), 0)
-  associate_public_ip_address = true
-  vpc_security_group_ids      = [aws_security_group.app.id, aws_security_group.ssh.id]
-
-
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp3"
-  }
-
-  depends_on = [
-    aws_db_instance.main,
-    aws_instance.redis,
-    aws_instance.rabbitmq,
-  ]
-
-  user_data = <<-EOT
-    #!/bin/bash
-    set -euxo pipefail
-    export DEBIAN_FRONTEND=noninteractive
-
-    sudo tee /etc/environment <<ENV
-    DATABASE_HOST=${aws_db_instance.main.address}
-    DATABASE_PORT=5432
-    DATABASE_NAME=reportes_db
-    DATABASE_USER=reportes_user
-    DATABASE_PASSWORD=Reportes_2024!
-    REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/2
-    CELERY_RESULT_BACKEND=redis://${aws_instance.redis.private_ip}:6379/3
-    RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    ALLOWED_HOSTS=*
-    DEBUG=True
-    SECRET_KEY=bite-terraform-secret-key
-    EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
-    ENV
-
-    export DATABASE_HOST=${aws_db_instance.main.address}
-    export DATABASE_PORT=5432
-    export DATABASE_NAME=reportes_db
-    export DATABASE_USER=reportes_user
-    export DATABASE_PASSWORD='Reportes_2024!'
-    export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/2
-    export CELERY_RESULT_BACKEND=redis://${aws_instance.redis.private_ip}:6379/3
-    export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export ALLOWED_HOSTS=*
-    export DEBUG=True
-    export SECRET_KEY=bite-terraform-secret-key
-
-    sudo apt-get install -y postgresql-client
-
-    ${local.git_bootstrap}
-
-    until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
-    until nc -z ${aws_instance.redis.private_ip} 6379; do sleep 5; done
-    until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
-
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
-      -c "CREATE DATABASE reportes_db;" || true
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
-      -c "CREATE USER reportes_user WITH PASSWORD 'Reportes_2024!';" || true
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
-      -c "GRANT ALL PRIVILEGES ON DATABASE reportes_db TO reportes_user;" || true
-    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d reportes_db \
-      -c "GRANT ALL ON SCHEMA public TO reportes_user;" || true
-
-    cd ${local.repo_dir}/manejador_reportes
-    sudo python3 -m pip install -r requirements.txt
-    python3 manage.py migrate --noinput || true
-    python3 manage.py seed_reportes_data || true
-    nohup python3 manage.py runserver 0.0.0.0:8003 > /var/log/manejador_reportes.log 2>&1 &
-  EOT
-
-  tags = merge(local.common_tags, {
-    Name    = "${var.project_prefix}-manejador-reportes"
-    Role    = "app-server"
-    Service = "reportes"
-  })
-}
-
 # -----------------------------------------------------------------------------
 # CELERY WORKER POOL
-# architecture.md §4.1 - Worker Pool (Auto-scaling) for ASR17
-# Two EC2 instances running Celery workers, each with configurable concurrency
+# architecture.md §4.1 - Worker Pool for ASR17
+# CHANGE 4: REDIS_URL removed; CELERY_RESULT_BACKEND moved to PostgreSQL.
+#           Worker no longer waits for Redis at startup.
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "worker_pool" {
@@ -745,9 +666,7 @@ resource "aws_instance" "worker_pool" {
 
   depends_on = [
     aws_db_instance.main,
-    aws_instance.redis,
     aws_instance.rabbitmq,
-    aws_instance.manejador_reportes,
   ]
 
   user_data = <<-EOT
@@ -761,8 +680,7 @@ resource "aws_instance" "worker_pool" {
     DATABASE_NAME=reportes_db
     DATABASE_USER=reportes_user
     DATABASE_PASSWORD=Reportes_2024!
-    REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/2
-    CELERY_RESULT_BACKEND=redis://${aws_instance.redis.private_ip}:6379/3
+    CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     CELERY_WORKER_CONCURRENCY=${var.celery_worker_concurrency}
@@ -775,8 +693,7 @@ resource "aws_instance" "worker_pool" {
     export DATABASE_NAME=reportes_db
     export DATABASE_USER=reportes_user
     export DATABASE_PASSWORD='Reportes_2024!'
-    export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/2
-    export CELERY_RESULT_BACKEND=redis://${aws_instance.redis.private_ip}:6379/3
+    export CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     export CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
     export CELERY_WORKER_CONCURRENCY=${var.celery_worker_concurrency}
@@ -786,7 +703,6 @@ resource "aws_instance" "worker_pool" {
     ${local.git_bootstrap}
 
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
-    until nc -z ${aws_instance.redis.private_ip} 6379; do sleep 5; done
     until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
 
     cd ${local.repo_dir}/manejador_reportes
@@ -805,306 +721,8 @@ resource "aws_instance" "worker_pool" {
 }
 
 # -----------------------------------------------------------------------------
-# APPLICATION LOAD BALANCER
-# architecture.md §3.2 - AWS Application Load Balancer
-# Routes ASR16 traffic → manejador_usuarios (port 8001)
-# Routes ASR17 traffic → manejador_reportes (port 8003)
-# manejador_cloud is internal only - not exposed via ALB
-# -----------------------------------------------------------------------------
-
-resource "aws_lb" "main" {
-  name               = "${var.project_prefix}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = tolist(data.aws_subnets.default.ids)
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb" })
-}
-
-# Target group for manejador_usuarios - ASR16 latency experiment
-resource "aws_lb_target_group" "usuarios" {
-  name     = "${var.project_prefix}-tg-usuarios"
-  port     = 8001
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
-
-  health_check {
-    path                = "/health"
-    interval            = 30
-    timeout             = 10
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    matcher             = "200"
-  }
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-usuarios" })
-}
-
-# Target group for manejador_reportes - ASR17 scalability experiment
-resource "aws_lb_target_group" "reportes" {
-  name     = "${var.project_prefix}-tg-reportes"
-  port     = 8003
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
-
-  health_check {
-    path                = "/health"
-    interval            = 30
-    timeout             = 10
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    matcher             = "200"
-  }
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-reportes" })
-}
-
-# Register app server instances with their target groups
-resource "aws_lb_target_group_attachment" "usuarios" {
-  target_group_arn = aws_lb_target_group.usuarios.arn
-  target_id        = aws_instance.manejador_usuarios.id
-  port             = 8001
-}
-
-resource "aws_lb_target_group_attachment" "reportes" {
-  target_group_arn = aws_lb_target_group.reportes.arn
-  target_id        = aws_instance.manejador_reportes.id
-  port             = 8003
-}
-
-# ALB Listener - HTTP on port 80
-# ASR2: redirects HTTP -> HTTPS to enforce 100% encrypted traffic
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  # ASR2 – Redirect HTTP to HTTPS (proves HTTP is rejected / redirected)
-  default_action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-}
-
-# ASR2 – Self-signed TLS certificate for AWS Academy (no real domain needed)
-# Generates a private key + self-signed cert directly on the ALB via ACM import
-resource "aws_acm_certificate" "asr2_selfsigned" {
-  private_key       = tls_private_key.asr2.private_key_pem
-  certificate_body  = tls_self_signed_cert.asr2.cert_pem
-
-  tags = merge(local.common_tags, {
-    Name = "${var.project_prefix}-asr2-selfsigned"
-    ASR  = "ASR2-Integridad"
-  })
-}
-
-resource "tls_private_key" "asr2" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-resource "tls_self_signed_cert" "asr2" {
-  private_key_pem = tls_private_key.asr2.private_key_pem
-
-  subject {
-    common_name  = "bite2-alb.bite.co"
-    organization = "BITE.co ASR2 Experiment"
-  }
-
-  validity_period_hours = 720  # 30 days
-
-  allowed_uses = [
-    "key_encipherment",
-    "digital_signature",
-    "server_auth",
-  ]
-}
-
-# ASR2 – HTTPS listener on port 443 (TLS termination at the ALB)
-resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate.asr2_selfsigned.arn
-
-  # Default action routes to seguridad (ASR2 tls-status endpoint)
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.seguridad.arn
-  }
-}
-
-resource "aws_lb_listener_rule" "events" {
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 10
-
-  action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-
-  condition {
-    path_pattern {
-      values = ["/events/*", "/events"]
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "reports" {
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 20
-
-  action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-
-  condition {
-    path_pattern {
-      values = ["/reports", "/reports/*"]
-    }
-  }
-}
-
-# -----------------------------------------------------------------------------
-# COGNITO USER POOL (ASR3 – Tenant Identity)
-# Custom attribute custom:empresa_id stores the tenant UUID
-# -----------------------------------------------------------------------------
-
-resource "aws_cognito_user_pool" "bite" {
-  name = "${var.project_prefix}-user-pool"
-
-  username_attributes      = ["email"]
-  auto_verified_attributes = ["email"]
-
-  password_policy {
-    minimum_length    = 8
-    require_uppercase = true
-    require_lowercase = true
-    require_numbers   = true
-    require_symbols   = false
-  }
-
-  schema {
-    attribute_data_type = "String"
-    name                = "empresa_id"
-    mutable             = true
-    string_attribute_constraints {
-      min_length = 36
-      max_length = 36
-    }
-  }
-
-  schema {
-    attribute_data_type = "String"
-    name                = "rol"
-    mutable             = true
-    string_attribute_constraints {
-      min_length = 4
-      max_length = 10
-    }
-  }
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-user-pool" })
-}
-
-resource "aws_cognito_user_pool_client" "bite_spa" {
-  name         = "${var.project_prefix}-spa-client"
-  user_pool_id = aws_cognito_user_pool.bite.id
-
-  # No client secret — SPA-compatible
-  generate_secret = false
-
-  explicit_auth_flows = [
-    "ALLOW_USER_PASSWORD_AUTH",
-    "ALLOW_REFRESH_TOKEN_AUTH",
-    "ALLOW_USER_SRP_AUTH",
-  ]
-}
-
-# Test users are created via management command (seed_auth_users) on first startup.
-# In Cognito (production), create them manually or via AWS CLI after apply:
-#
-#   aws cognito-idp admin-create-user \
-#     --user-pool-id <user_pool_id> \
-#     --username empresa_a@bite.co \
-#     --temporary-password BiteCo2024! \
-#     --user-attributes Name=email,Value=empresa_a@bite.co Name=custom:empresa_id,Value=550e8400-e29b-41d4-a716-446655440001 Name=custom:rol,Value=ADMIN
-#
-#   aws cognito-idp admin-create-user \
-#     --user-pool-id <user_pool_id> \
-#     --username empresa_b@bite.co \
-#     --temporary-password BiteCo2024! \
-#     --user-attributes Name=email,Value=empresa_b@bite.co Name=custom:empresa_id,Value=550e8400-e29b-41d4-a716-446655440002 Name=custom:rol,Value=MANAGER
-
-# -----------------------------------------------------------------------------
-# SECURITY GROUP FOR AUTH SERVICES
-# Ports 8004 (autenticacion) and 8005 (seguridad) — ingress from ALB only
-# -----------------------------------------------------------------------------
-
-resource "aws_security_group" "auth" {
-  name        = "${var.project_prefix}-auth"
-  description = "Auth services (manejador_autenticacion + manejador_seguridad)"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description     = "manejador_autenticacion from ALB"
-    from_port       = 8004
-    to_port         = 8004
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-
-  ingress {
-    description = "manejador_autenticacion from VPC (inter-service)"
-    from_port   = 8004
-    to_port     = 8004
-    protocol    = "tcp"
-    cidr_blocks = [data.aws_vpc.default.cidr_block]
-  }
-
-  ingress {
-    description = "manejador_seguridad from VPC (inter-service)"
-    from_port   = 8005
-    to_port     = 8005
-    protocol    = "tcp"
-    cidr_blocks = [data.aws_vpc.default.cidr_block]
-  }
-
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-auth" })
-}
-
-# -----------------------------------------------------------------------------
-# MANEJADOR_AUTENTICACION — port 8004
+# MANEJADOR_AUTENTICACION — port 8004 (unchanged EC2)
+# CHANGE 4: REDIS_URL kept (db 0 = token cache; one of the two allowed users)
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "manejador_autenticacion" {
@@ -1121,6 +739,7 @@ resource "aws_instance" "manejador_autenticacion" {
 
   depends_on = [
     aws_db_instance.main,
+    aws_instance.redis,
     aws_cognito_user_pool.bite,
   ]
 
@@ -1135,6 +754,7 @@ resource "aws_instance" "manejador_autenticacion" {
     DATABASE_NAME=seguridad_db
     DATABASE_USER=seguridad_user
     DATABASE_PASSWORD=Seguridad_2024!
+    REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
     COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
     COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     COGNITO_REGION=${var.region}
@@ -1149,6 +769,7 @@ resource "aws_instance" "manejador_autenticacion" {
     export DATABASE_NAME=seguridad_db
     export DATABASE_USER=seguridad_user
     export DATABASE_PASSWORD='Seguridad_2024!'
+    export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
     export COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
     export COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     export COGNITO_REGION=${var.region}
@@ -1162,6 +783,7 @@ resource "aws_instance" "manejador_autenticacion" {
     ${local.git_bootstrap}
 
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
+    until nc -z ${aws_instance.redis.private_ip} 6379; do sleep 5; done
 
     PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
       -c "CREATE DATABASE seguridad_db;" || true
@@ -1187,7 +809,7 @@ resource "aws_instance" "manejador_autenticacion" {
 }
 
 # -----------------------------------------------------------------------------
-# MANEJADOR_SEGURIDAD — port 8005
+# MANEJADOR_SEGURIDAD — port 8005 (unchanged EC2)
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "manejador_seguridad" {
@@ -1263,7 +885,870 @@ resource "aws_instance" "manejador_seguridad" {
 }
 
 # -----------------------------------------------------------------------------
-# S3 FRONTEND BUCKET — static HTML/CSS/JS site (deploy: aws s3 sync frontend/ s3://<bucket>/)
+# CHANGE 1 — INTERNAL ALBs
+# Two internal (non-internet-facing) ALBs replace the single public ALB.
+# Traffic arrives via API Gateway HTTP integrations using the ALB DNS names.
+# Both use aws_security_group.alb so existing aws_security_group.app ingress
+# rules (which reference alb SG id) keep working without modification.
+# -----------------------------------------------------------------------------
+
+resource "aws_lb" "usuarios" {
+  name               = "${var.project_prefix}-alb-usuarios"
+  internal           = true
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = tolist(data.aws_subnets.default.ids)
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb-usuarios" })
+}
+
+resource "aws_lb" "reportes" {
+  name               = "${var.project_prefix}-alb-reportes"
+  internal           = true
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = tolist(data.aws_subnets.default.ids)
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb-reportes" })
+}
+
+# Target group for manejador_usuarios - ASR16 latency experiment
+# Kept from original config; ASG (CHANGE 2) registers instances automatically.
+resource "aws_lb_target_group" "usuarios" {
+  name     = "${var.project_prefix}-tg-usuarios"
+  port     = 8001
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-usuarios" })
+}
+
+# Target group for manejador_reportes - ASR17 scalability experiment
+# Kept from original config; ASG (CHANGE 2) registers instances automatically.
+resource "aws_lb_target_group" "reportes" {
+  name     = "${var.project_prefix}-tg-reportes"
+  port     = 8003
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-reportes" })
+}
+
+# HTTP listeners on the internal ALBs — port 80, forward to target groups
+resource "aws_lb_listener" "usuarios" {
+  load_balancer_arn = aws_lb.usuarios.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.usuarios.arn
+  }
+}
+
+resource "aws_lb_listener" "reportes" {
+  load_balancer_arn = aws_lb.reportes.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.reportes.arn
+  }
+}
+
+# -----------------------------------------------------------------------------
+# CHANGE 2 — AUTO SCALING GROUPS for manejador_usuarios and manejador_reportes
+# The fixed aws_instance.manejador_usuarios and aws_instance.manejador_reportes
+# are replaced by launch templates + ASGs. ASGs self-register with the target
+# groups above, so no aws_lb_target_group_attachment resources are needed.
+# -----------------------------------------------------------------------------
+
+# --- manejador_usuarios ASG ---
+
+resource "aws_launch_template" "usuarios" {
+  name_prefix   = "${var.project_prefix}-lt-usuarios-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type_app
+
+  vpc_security_group_ids = [aws_security_group.app.id, aws_security_group.ssh.id]
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+    }
+  }
+
+  # CHANGE 4: REDIS_URL removed from usuarios entirely
+  user_data = base64encode(<<-EOT
+    #!/bin/bash
+    set -euxo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    sudo tee /etc/environment <<ENV
+    DATABASE_HOST=${aws_db_instance.main.address}
+    DATABASE_PORT=5432
+    DATABASE_NAME=usuarios_db
+    DATABASE_USER=usuarios_user
+    DATABASE_PASSWORD=Usuarios_2024!
+    RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
+    RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
+    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    AUTH_SERVICE_TIMEOUT=10
+    ALLOWED_HOSTS=*
+    DEBUG=True
+    SECRET_KEY=bite-terraform-secret-key
+    EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+    ENV
+
+    export DATABASE_HOST=${aws_db_instance.main.address}
+    export DATABASE_PORT=5432
+    export DATABASE_NAME=usuarios_db
+    export DATABASE_USER=usuarios_user
+    export DATABASE_PASSWORD='Usuarios_2024!'
+    export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
+    export RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
+    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export AUTH_SERVICE_TIMEOUT=10
+    export ALLOWED_HOSTS=*
+    export DEBUG=True
+    export SECRET_KEY=bite-terraform-secret-key
+
+    sudo apt-get install -y postgresql-client
+
+    ${local.git_bootstrap}
+
+    until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
+    until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
+    until nc -z ${aws_instance.manejador_cloud.private_ip} 8002; do sleep 5; done
+    until nc -z ${aws_instance.manejador_autenticacion.private_ip} 8004; do sleep 5; done
+
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
+      -c "CREATE DATABASE usuarios_db;" || true
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
+      -c "CREATE USER usuarios_user WITH PASSWORD 'Usuarios_2024!';" || true
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
+      -c "GRANT ALL PRIVILEGES ON DATABASE usuarios_db TO usuarios_user;" || true
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d usuarios_db \
+      -c "GRANT ALL ON SCHEMA public TO usuarios_user;" || true
+
+    cd ${local.repo_dir}/manejador_usuarios
+    sudo python3 -m pip install -r requirements.txt
+    python3 manage.py migrate --noinput || true
+    python3 manage.py seed_usuarios_data || true
+    nohup python3 manage.py runserver 0.0.0.0:8001 > /var/log/manejador_usuarios.log 2>&1 &
+  EOT
+  )
+
+  tags = merge(local.common_tags, {
+    Name    = "${var.project_prefix}-lt-usuarios"
+    Service = "usuarios"
+  })
+}
+
+resource "aws_autoscaling_group" "usuarios" {
+  name                = "${var.project_prefix}-asg-usuarios"
+  min_size            = 1
+  max_size            = 4
+  desired_capacity    = 1
+  vpc_zone_identifier = tolist(data.aws_subnets.default.ids)
+  target_group_arns   = [aws_lb_target_group.usuarios.arn]
+
+  launch_template {
+    id      = aws_launch_template.usuarios.id
+    version = "$Latest"
+  }
+
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+
+  depends_on = [
+    aws_db_instance.main,
+    aws_instance.rabbitmq,
+    aws_instance.manejador_cloud,
+    aws_instance.manejador_autenticacion,
+  ]
+
+  tag {
+    key                 = "Name"
+    value               = "${var.project_prefix}-manejador-usuarios"
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Service"
+    value               = "usuarios"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_policy" "usuarios_scale_out" {
+  name                   = "${var.project_prefix}-usuarios-scale-out"
+  autoscaling_group_name = aws_autoscaling_group.usuarios.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 120
+  policy_type            = "SimpleScaling"
+}
+
+resource "aws_autoscaling_policy" "usuarios_scale_in" {
+  name                   = "${var.project_prefix}-usuarios-scale-in"
+  autoscaling_group_name = aws_autoscaling_group.usuarios.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 300
+  policy_type            = "SimpleScaling"
+}
+
+resource "aws_cloudwatch_metric_alarm" "usuarios_cpu_high" {
+  alarm_name          = "${var.project_prefix}-usuarios-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 70
+  alarm_description   = "Scale out manejador_usuarios when CPU > 70% for 2 periods"
+  alarm_actions       = [aws_autoscaling_policy.usuarios_scale_out.arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.usuarios.name
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-usuarios-cpu-high" })
+}
+
+resource "aws_cloudwatch_metric_alarm" "usuarios_cpu_low" {
+  alarm_name          = "${var.project_prefix}-usuarios-cpu-low"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 5
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 30
+  alarm_description   = "Scale in manejador_usuarios when CPU < 30% for 5 periods"
+  alarm_actions       = [aws_autoscaling_policy.usuarios_scale_in.arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.usuarios.name
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-usuarios-cpu-low" })
+}
+
+# --- manejador_reportes ASG ---
+
+resource "aws_launch_template" "reportes" {
+  name_prefix   = "${var.project_prefix}-lt-reportes-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type_app
+
+  vpc_security_group_ids = [aws_security_group.app.id, aws_security_group.ssh.id]
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+    }
+  }
+
+  # CHANGE 4: REDIS_URL removed; CELERY_RESULT_BACKEND moved to PostgreSQL
+  user_data = base64encode(<<-EOT
+    #!/bin/bash
+    set -euxo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    sudo tee /etc/environment <<ENV
+    DATABASE_HOST=${aws_db_instance.main.address}
+    DATABASE_PORT=5432
+    DATABASE_NAME=reportes_db
+    DATABASE_USER=reportes_user
+    DATABASE_PASSWORD=Reportes_2024!
+    CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
+    RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
+    CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
+    ALLOWED_HOSTS=*
+    DEBUG=True
+    SECRET_KEY=bite-terraform-secret-key
+    EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+    ENV
+
+    export DATABASE_HOST=${aws_db_instance.main.address}
+    export DATABASE_PORT=5432
+    export DATABASE_NAME=reportes_db
+    export DATABASE_USER=reportes_user
+    export DATABASE_PASSWORD='Reportes_2024!'
+    export CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
+    export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
+    export CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
+    export ALLOWED_HOSTS=*
+    export DEBUG=True
+    export SECRET_KEY=bite-terraform-secret-key
+
+    sudo apt-get install -y postgresql-client
+
+    ${local.git_bootstrap}
+
+    until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
+    until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
+
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
+      -c "CREATE DATABASE reportes_db;" || true
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
+      -c "CREATE USER reportes_user WITH PASSWORD 'Reportes_2024!';" || true
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
+      -c "GRANT ALL PRIVILEGES ON DATABASE reportes_db TO reportes_user;" || true
+    PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d reportes_db \
+      -c "GRANT ALL ON SCHEMA public TO reportes_user;" || true
+
+    cd ${local.repo_dir}/manejador_reportes
+    sudo python3 -m pip install -r requirements.txt
+    python3 manage.py migrate --noinput || true
+    python3 manage.py seed_reportes_data || true
+    nohup python3 manage.py runserver 0.0.0.0:8003 > /var/log/manejador_reportes.log 2>&1 &
+  EOT
+  )
+
+  tags = merge(local.common_tags, {
+    Name    = "${var.project_prefix}-lt-reportes"
+    Service = "reportes"
+  })
+}
+
+resource "aws_autoscaling_group" "reportes" {
+  name                = "${var.project_prefix}-asg-reportes"
+  min_size            = 1
+  max_size            = 6
+  desired_capacity    = 2
+  vpc_zone_identifier = tolist(data.aws_subnets.default.ids)
+  target_group_arns   = [aws_lb_target_group.reportes.arn]
+
+  launch_template {
+    id      = aws_launch_template.reportes.id
+    version = "$Latest"
+  }
+
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+
+  depends_on = [
+    aws_db_instance.main,
+    aws_instance.rabbitmq,
+  ]
+
+  tag {
+    key                 = "Name"
+    value               = "${var.project_prefix}-manejador-reportes"
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Service"
+    value               = "reportes"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_policy" "reportes_scale_out" {
+  name                   = "${var.project_prefix}-reportes-scale-out"
+  autoscaling_group_name = aws_autoscaling_group.reportes.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 120
+  policy_type            = "SimpleScaling"
+}
+
+resource "aws_autoscaling_policy" "reportes_scale_in" {
+  name                   = "${var.project_prefix}-reportes-scale-in"
+  autoscaling_group_name = aws_autoscaling_group.reportes.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 300
+  policy_type            = "SimpleScaling"
+}
+
+resource "aws_cloudwatch_metric_alarm" "reportes_cpu_high" {
+  alarm_name          = "${var.project_prefix}-reportes-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 70
+  alarm_description   = "Scale out manejador_reportes when CPU > 70% for 2 periods"
+  alarm_actions       = [aws_autoscaling_policy.reportes_scale_out.arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.reportes.name
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-reportes-cpu-high" })
+}
+
+resource "aws_cloudwatch_metric_alarm" "reportes_cpu_low" {
+  alarm_name          = "${var.project_prefix}-reportes-cpu-low"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 5
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 30
+  alarm_description   = "Scale in manejador_reportes when CPU < 30% for 5 periods"
+  alarm_actions       = [aws_autoscaling_policy.reportes_scale_in.arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.reportes.name
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-reportes-cpu-low" })
+}
+
+# -----------------------------------------------------------------------------
+# CHANGE 1 — API GATEWAY REST API
+# Single entry point for all frontend traffic. Replaces the old internet-facing
+# ALB. Each route uses an HTTP_PROXY integration:
+#   /auth/*      → manejador_autenticacion private IP :8004
+#   /security/*  → manejador_seguridad private IP :8005
+#   /cloud/*     → manejador_cloud private IP :8002
+#   /projects/*  → alb_usuarios (internal) :80
+#   /events/*    → alb_reportes (internal) :80
+#   /reports/*   → alb_reportes (internal) :80
+# -----------------------------------------------------------------------------
+
+resource "aws_api_gateway_rest_api" "bite" {
+  name        = "${var.project_prefix}-api"
+  description = "BITE.co API Gateway - routes all service traffic"
+
+  endpoint_configuration {
+    types = ["REGIONAL"]
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-api" })
+}
+
+# ── /auth ──────────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "auth_parent" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
+  path_part   = "auth"
+}
+
+resource "aws_api_gateway_resource" "auth_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_resource.auth_parent.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "auth" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  resource_id   = aws_api_gateway_resource.auth_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_integration" "auth" {
+  rest_api_id             = aws_api_gateway_rest_api.bite.id
+  resource_id             = aws_api_gateway_resource.auth_proxy.id
+  http_method             = aws_api_gateway_method.auth.http_method
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "http://${aws_instance.manejador_autenticacion.private_ip}:8004/auth/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+# ── /security ─────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "security_parent" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
+  path_part   = "security"
+}
+
+resource "aws_api_gateway_resource" "security_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_resource.security_parent.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "security" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  resource_id   = aws_api_gateway_resource.security_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_integration" "security" {
+  rest_api_id             = aws_api_gateway_rest_api.bite.id
+  resource_id             = aws_api_gateway_resource.security_proxy.id
+  http_method             = aws_api_gateway_method.security.http_method
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "http://${aws_instance.manejador_seguridad.private_ip}:8005/security/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+# ── /cloud ────────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "cloud_parent" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
+  path_part   = "cloud"
+}
+
+resource "aws_api_gateway_resource" "cloud_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_resource.cloud_parent.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "cloud" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  resource_id   = aws_api_gateway_resource.cloud_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_integration" "cloud" {
+  rest_api_id             = aws_api_gateway_rest_api.bite.id
+  resource_id             = aws_api_gateway_resource.cloud_proxy.id
+  http_method             = aws_api_gateway_method.cloud.http_method
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "http://${aws_instance.manejador_cloud.private_ip}:8002/cloud/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+# ── /projects ─────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "projects_parent" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
+  path_part   = "projects"
+}
+
+resource "aws_api_gateway_resource" "projects_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_resource.projects_parent.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "projects" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  resource_id   = aws_api_gateway_resource.projects_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_integration" "projects" {
+  rest_api_id             = aws_api_gateway_rest_api.bite.id
+  resource_id             = aws_api_gateway_resource.projects_proxy.id
+  http_method             = aws_api_gateway_method.projects.http_method
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "http://${aws_lb.usuarios.dns_name}/projects/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+# ── /events ───────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "events_parent" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
+  path_part   = "events"
+}
+
+resource "aws_api_gateway_resource" "events_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_resource.events_parent.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "events" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  resource_id   = aws_api_gateway_resource.events_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_integration" "events" {
+  rest_api_id             = aws_api_gateway_rest_api.bite.id
+  resource_id             = aws_api_gateway_resource.events_proxy.id
+  http_method             = aws_api_gateway_method.events.http_method
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "http://${aws_lb.reportes.dns_name}/events/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+# ── /reports ──────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "reports_parent" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_rest_api.bite.root_resource_id
+  path_part   = "reports"
+}
+
+resource "aws_api_gateway_resource" "reports_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+  parent_id   = aws_api_gateway_resource.reports_parent.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "reports" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  resource_id   = aws_api_gateway_resource.reports_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_integration" "reports" {
+  rest_api_id             = aws_api_gateway_rest_api.bite.id
+  resource_id             = aws_api_gateway_resource.reports_proxy.id
+  http_method             = aws_api_gateway_method.reports.http_method
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "http://${aws_lb.reportes.dns_name}/reports/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+# ── Deployment & Stage ────────────────────────────────────────────────────
+
+resource "aws_api_gateway_deployment" "bite" {
+  rest_api_id = aws_api_gateway_rest_api.bite.id
+
+  # Must depend on all integrations so the deployment captures every route
+  depends_on = [
+    aws_api_gateway_integration.auth,
+    aws_api_gateway_integration.security,
+    aws_api_gateway_integration.cloud,
+    aws_api_gateway_integration.projects,
+    aws_api_gateway_integration.events,
+    aws_api_gateway_integration.reports,
+  ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_api_gateway_stage" "prod" {
+  rest_api_id   = aws_api_gateway_rest_api.bite.id
+  deployment_id = aws_api_gateway_deployment.bite.id
+  stage_name    = "prod"
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-api-stage-prod" })
+}
+
+# -----------------------------------------------------------------------------
+# COGNITO USER POOL (ASR3 – Tenant Identity) — UNCHANGED
+# Custom attribute custom:empresa_id stores the tenant UUID
+# -----------------------------------------------------------------------------
+
+resource "aws_cognito_user_pool" "bite" {
+  name = "${var.project_prefix}-user-pool"
+
+  username_attributes      = ["email"]
+  auto_verified_attributes = ["email"]
+
+  password_policy {
+    minimum_length    = 8
+    require_uppercase = true
+    require_lowercase = true
+    require_numbers   = true
+    require_symbols   = false
+  }
+
+  schema {
+    attribute_data_type = "String"
+    name                = "empresa_id"
+    mutable             = true
+    string_attribute_constraints {
+      min_length = 36
+      max_length = 36
+    }
+  }
+
+  schema {
+    attribute_data_type = "String"
+    name                = "rol"
+    mutable             = true
+    string_attribute_constraints {
+      min_length = 4
+      max_length = 10
+    }
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-user-pool" })
+}
+
+resource "aws_cognito_user_pool_client" "bite_spa" {
+  name         = "${var.project_prefix}-spa-client"
+  user_pool_id = aws_cognito_user_pool.bite.id
+
+  # No client secret — SPA-compatible
+  generate_secret = false
+
+  explicit_auth_flows = [
+    "ALLOW_USER_PASSWORD_AUTH",
+    "ALLOW_REFRESH_TOKEN_AUTH",
+    "ALLOW_USER_SRP_AUTH",
+  ]
+}
+
+# -----------------------------------------------------------------------------
+# COGNITO TEST USERS — provisioned automatically so no manual CLI steps are
+# needed after terraform apply.
+#
+# Both users are created with message_action = "SUPPRESS" (no welcome e-mail)
+# and immediately confirmed to CONFIRMED status via a local-exec provisioner
+# (admin-set-user-password --permanent) so no FORCE_CHANGE_PASSWORD challenge
+# fires on first login.
+#
+# lifecycle { ignore_changes = [temporary_password] } prevents Terraform from
+# resetting the password on every subsequent apply.
+# -----------------------------------------------------------------------------
+
+resource "aws_cognito_user" "empresa_a" {
+  user_pool_id = aws_cognito_user_pool.bite.id
+  username     = "empresa_a@bite.co"
+
+  attributes = {
+    email               = "empresa_a@bite.co"
+    email_verified      = "true"
+    "custom:empresa_id" = "550e8400-e29b-41d4-a716-446655440001"
+    "custom:rol"        = "admin"
+  }
+
+  temporary_password = "BiteCo2024!"
+  message_action     = "SUPPRESS" # do not send welcome email (fails in Academy)
+
+  lifecycle {
+    ignore_changes = [temporary_password] # do not reset password on re-apply
+  }
+}
+
+resource "aws_cognito_user" "empresa_b" {
+  user_pool_id = aws_cognito_user_pool.bite.id
+  username     = "empresa_b@bite.co"
+
+  attributes = {
+    email               = "empresa_b@bite.co"
+    email_verified      = "true"
+    "custom:empresa_id" = "550e8400-e29b-41d4-a716-446655440002"
+    "custom:rol"        = "admin"
+  }
+
+  temporary_password = "BiteCo2024!"
+  message_action     = "SUPPRESS"
+
+  lifecycle {
+    ignore_changes = [temporary_password]
+  }
+}
+
+# Promote empresa_a from FORCE_CHANGE_PASSWORD → CONFIRMED immediately.
+resource "null_resource" "confirm_empresa_a" {
+  depends_on = [aws_cognito_user.empresa_a]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      aws cognito-idp admin-set-user-password \
+        --user-pool-id ${aws_cognito_user_pool.bite.id} \
+        --username empresa_a@bite.co \
+        --password "BiteCo2024!" \
+        --permanent \
+        --region ${var.region}
+    EOT
+  }
+}
+
+# Promote empresa_b from FORCE_CHANGE_PASSWORD → CONFIRMED immediately.
+resource "null_resource" "confirm_empresa_b" {
+  depends_on = [aws_cognito_user.empresa_b]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      aws cognito-idp admin-set-user-password \
+        --user-pool-id ${aws_cognito_user_pool.bite.id} \
+        --username empresa_b@bite.co \
+        --password "BiteCo2024!" \
+        --permanent \
+        --region ${var.region}
+    EOT
+  }
+}
+
+# -----------------------------------------------------------------------------
+# S3 FRONTEND BUCKET — static HTML/CSS/JS site
+# CHANGE 1: config.js now points to the API Gateway invoke URL instead of ALB.
+#           The template variable remains "alb_dns" but receives the APIGW host
+#           so all CONFIG.* entries in config.js resolve to https://<apigw-host>.
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "frontend" {
@@ -1299,15 +1784,14 @@ resource "aws_s3_bucket_policy" "frontend_public" {
   depends_on = [aws_s3_bucket_public_access_block.frontend]
 }
 
-# Auto-upload frontend files — config.js is generated from template with live ALB DNS.
-# Terraform re-uploads files whenever their content changes (etag tracking).
-
+# FIX 3: variable renamed from alb_dns → api_gw_url to match config.js.tpl
+# (config.js.tpl was updated in PROMPT 4 to use ${api_gw_url})
 resource "aws_s3_object" "frontend_config" {
   bucket       = aws_s3_bucket.frontend.id
   key          = "config.js"
   content_type = "application/javascript"
   content = templatefile("${path.module}/frontend/config.js.tpl", {
-    alb_dns = aws_lb.main.dns_name
+    api_gw_url = trimprefix(aws_api_gateway_stage.prod.invoke_url, "https://")
   })
   depends_on = [
     aws_s3_bucket_public_access_block.frontend,
@@ -1343,195 +1827,156 @@ resource "aws_s3_object" "frontend_metrics" {
 }
 
 # -----------------------------------------------------------------------------
-# ALB UPDATES — add listener rules for /auth/* and /security/*
+# CHANGE 5 — LAMBDA + EVENTBRIDGE (cloud_collector)
+# Runs every 6 hours to collect AWS Cost Explorer data into cloud_db (primary).
+# Writes directly to DATABASE_HOST (primary RDS); reads on the service side go
+# through DATABASE_READ_HOST (read replica).
+#
+# Prerequisites:
+#   1. Create cloud_collector/ directory at the repo root with handler.py
+#      (function signature: lambda_handler(event, context))
+#   2. `terraform init` to pull hashicorp/archive provider
 # -----------------------------------------------------------------------------
 
-resource "aws_lb_target_group" "autenticacion" {
-  name     = "${var.project_prefix}-tg-auth"
-  port     = 8004
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
-
-  health_check {
-    path                = "/health"
-    interval            = 30
-    timeout             = 10
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    matcher             = "200"
-  }
-
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-auth" })
+data "archive_file" "cloud_collector" {
+  type        = "zip"
+  source_dir  = "${path.module}/cloud_collector"
+  output_path = "${path.module}/cloud_collector.zip"
 }
 
-resource "aws_lb_target_group" "seguridad" {
-  name     = "${var.project_prefix}-tg-security"
-  port     = 8005
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
+resource "aws_lambda_function" "cloud_collector" {
+  filename      = data.archive_file.cloud_collector.output_path
+  function_name = "${var.project_prefix}-cloud-collector"
+  runtime       = "python3.11"
+  handler       = "handler.lambda_handler"
+  timeout       = 300
+  memory_size   = 256
 
-  health_check {
-    path                = "/health"
-    interval            = 30
-    timeout             = 10
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    matcher             = "200"
-  }
+  source_code_hash = data.archive_file.cloud_collector.output_base64sha256
 
-  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-security" })
-}
-
-resource "aws_lb_target_group_attachment" "autenticacion" {
-  target_group_arn = aws_lb_target_group.autenticacion.arn
-  target_id        = aws_instance.manejador_autenticacion.id
-  port             = 8004
-}
-
-resource "aws_lb_target_group_attachment" "seguridad" {
-  target_group_arn = aws_lb_target_group.seguridad.arn
-  target_id        = aws_instance.manejador_seguridad.id
-  port             = 8005
-}
-
-resource "aws_lb_listener_rule" "auth" {
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 5
-
-  action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
+  environment {
+    variables = {
+      DATABASE_HOST     = aws_db_instance.main.address
+      DATABASE_NAME     = "cloud_db"
+      DATABASE_USER     = "cloud_user"
+      DATABASE_PASSWORD = "Cloud_2024!"
+      REDIS_URL         = "redis://${aws_instance.redis.private_ip}:6379/1"
     }
   }
 
-  condition {
-    path_pattern {
-      values = ["/auth/*", "/auth"]
-    }
+  vpc_config {
+    subnet_ids         = tolist(data.aws_subnets.default.ids)
+    security_group_ids = [aws_security_group.lambda.id]
   }
+
+  role = aws_iam_role.lambda_cloud_collector.arn
+
+  tags = merge(local.common_tags, {
+    Name    = "${var.project_prefix}-cloud-collector"
+    Service = "cloud"
+  })
 }
 
-resource "aws_lb_listener_rule" "security" {
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 6
+resource "aws_cloudwatch_event_rule" "cloud_collector_schedule" {
+  name                = "${var.project_prefix}-cloud-collector-schedule"
+  description         = "Trigger cloud_collector Lambda every 6 hours"
+  schedule_expression = "rate(6 hours)"
 
-  action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-
-  condition {
-    path_pattern {
-      values = ["/security/*", "/security"]
-    }
-  }
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-cloud-collector-schedule" })
 }
 
-# ASR2 – HTTPS listener rules (mirror of HTTP rules, now over TLS)
-resource "aws_lb_listener_rule" "https_auth" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 5
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.autenticacion.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/auth/*", "/auth"]
-    }
-  }
+resource "aws_cloudwatch_event_target" "cloud_collector_target" {
+  rule = aws_cloudwatch_event_rule.cloud_collector_schedule.name
+  arn  = aws_lambda_function.cloud_collector.arn
 }
 
-resource "aws_lb_listener_rule" "https_security" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 6
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.seguridad.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/security/*", "/security"]
-    }
-  }
+resource "aws_lambda_permission" "allow_eventbridge" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.cloud_collector.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.cloud_collector_schedule.arn
 }
 
-resource "aws_lb_listener_rule" "https_usuarios" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 10
+resource "aws_iam_role" "lambda_cloud_collector" {
+  name = "${var.project_prefix}-lambda-cloud-collector"
 
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.usuarios.arn
-  }
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
 
-  condition {
-    path_pattern {
-      values = ["/projects/*", "/projects"]
-    }
-  }
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-lambda-cloud-collector" })
 }
 
-resource "aws_lb_listener_rule" "https_events" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 15
+resource "aws_iam_role_policy" "lambda_cloud_collector" {
+  name = "${var.project_prefix}-lambda-cloud-collector-policy"
+  role = aws_iam_role.lambda_cloud_collector.id
 
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.reportes.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/events/*", "/events"]
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "https_reports" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 20
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.reportes.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/reports", "/reports/*"]
-    }
-  }
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ce:GetCostAndUsage", "ce:GetCostForecast"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "*"
+      }
+    ]
+  })
 }
 
 # -----------------------------------------------------------------------------
-# OUTPUTS - use these in JMeter HTTP Request samplers
+# OUTPUTS - use these in JMeter HTTP Request samplers and for debugging
+# Every original output is preserved; values updated where aws_lb.main was used.
+# New outputs: api_gateway_invoke_url, alb_usuarios_dns, alb_reportes_dns,
+#              cloud_read_replica_endpoint, rds_primary_endpoint
 # -----------------------------------------------------------------------------
 
+output "api_gateway_invoke_url" {
+  description = "API Gateway invoke URL — base URL for all frontend calls (CHANGE 1)"
+  value       = aws_api_gateway_stage.prod.invoke_url
+}
+
+output "alb_usuarios_dns" {
+  description = "Internal ALB DNS for manejador_usuarios (CHANGE 1)"
+  value       = aws_lb.usuarios.dns_name
+}
+
+output "alb_reportes_dns" {
+  description = "Internal ALB DNS for manejador_reportes (CHANGE 1)"
+  value       = aws_lb.reportes.dns_name
+}
+
+# Replaces old alb_dns_name (was aws_lb.main.dns_name)
 output "alb_dns_name" {
-  description = "ALB DNS name - use this as the JMeter host for both experiments"
-  value       = aws_lb.main.dns_name
+  description = "API Gateway invoke URL (replaces single ALB DNS - CHANGE 1)"
+  value       = aws_api_gateway_stage.prod.invoke_url
 }
 
+# Replaces old alb_usuarios_url (was https://<alb>/projects)
 output "alb_usuarios_url" {
-  description = "ASR16 latency experiment endpoint (HTTPS)"
-  value       = "https://${aws_lb.main.dns_name}/projects"
+  description = "ASR16 latency experiment endpoint via API Gateway"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/projects"
 }
 
+# Replaces old alb_reportes_url (was https://<alb>/events/batch)
 output "alb_reportes_url" {
-  description = "ASR17 scalability experiment endpoint (HTTPS)"
-  value       = "https://${aws_lb.main.dns_name}/events/batch"
+  description = "ASR17 scalability experiment endpoint via API Gateway"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/events/batch"
 }
 
 output "manejador_cloud_public_ip" {
@@ -1555,8 +2000,18 @@ output "rabbitmq_management_url" {
 }
 
 output "rds_endpoint" {
-  description = "RDS PostgreSQL endpoint — all microservices connect here"
+  description = "RDS PostgreSQL primary endpoint — all microservices connect here"
   value       = aws_db_instance.main.address
+}
+
+output "rds_primary_endpoint" {
+  description = "RDS PostgreSQL primary endpoint (write path) — CHANGE 3"
+  value       = aws_db_instance.main.address
+}
+
+output "cloud_read_replica_endpoint" {
+  description = "RDS read replica endpoint for cloud_db reads (CQRS) — CHANGE 3"
+  value       = aws_db_instance.cloud_read_replica.address
 }
 
 output "worker_public_ips" {
@@ -1589,29 +2044,46 @@ output "manejador_seguridad_public_ip" {
   value       = aws_instance.manejador_seguridad.public_ip
 }
 
-
+# Replaces old alb_auth_url (was http://<alb>/auth/login)
 output "alb_auth_url" {
-  description = "ASR2/ASR3 auth endpoint via ALB"
-  value       = "http://${aws_lb.main.dns_name}/auth/login"
+  description = "ASR2/ASR3 auth endpoint via API Gateway"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/auth/login"
 }
 
-# ASR2 – Integridad: HTTPS endpoints for the experiment
+# ASR2 – security endpoints now route through API Gateway instead of the old ALB
 output "asr2_tls_status_url_http" {
-  description = "ASR2 experiment: HTTP request (should be rejected/redirected)"
-  value       = "http://${aws_lb.main.dns_name}/security/tls-status"
+  description = "ASR2 experiment: security/tls-status via API Gateway"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/tls-status"
 }
 
 output "asr2_tls_status_url_https" {
-  description = "ASR2 experiment: HTTPS request (should be accepted with TLS info)"
-  value       = "https://${aws_lb.main.dns_name}/security/tls-status"
+  description = "ASR2 experiment: security/tls-status via API Gateway (HTTPS)"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/tls-status"
 }
 
 output "asr2_integrity_check_url" {
-  description = "ASR2 experiment: HMAC integrity check endpoint"
-  value       = "https://${aws_lb.main.dns_name}/security/integrity-check"
+  description = "ASR2 experiment: HMAC integrity check endpoint via API Gateway"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/integrity-check"
 }
 
 output "asr2_integrity_log_url" {
-  description = "ASR2 experiment: audit log for all TLS/integrity checks"
-  value       = "https://${aws_lb.main.dns_name}/security/integrity-log"
+  description = "ASR2 experiment: audit log for all TLS/integrity checks via API Gateway"
+  value       = "${aws_api_gateway_stage.prod.invoke_url}/security/integrity-log"
+}
+
+output "cognito_test_users" {
+  description = "Test users provisioned in Cognito — use for login verification after apply"
+  value = {
+    empresa_a = {
+      username   = "empresa_a@bite.co"
+      empresa_id = "550e8400-e29b-41d4-a716-446655440001"
+      password   = "BiteCo2024!"
+    }
+    empresa_b = {
+      username   = "empresa_b@bite.co"
+      empresa_id = "550e8400-e29b-41d4-a716-446655440002"
+      password   = "BiteCo2024!"
+    }
+  }
+  sensitive = false
 }

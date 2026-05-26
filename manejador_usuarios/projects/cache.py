@@ -1,80 +1,54 @@
+"""
+CHANGE 4 — Redis removed from manejador_usuarios.
+
+CuentaCloudCache and EmpresaCache previously stored data in Redis DB 0.
+They now pass through directly to the Resource Service or local DB.
+The class interface is preserved so services.py calls require no structural change.
+
+CuentaCloud validation: always calls Resource Service HTTP (ResourceServiceClient).
+Empresa lookup: always queries local usuarios_db directly (indexed by id).
+"""
 import logging
-from django.core.cache import cache
-from django.conf import settings
 
 logger = logging.getLogger(__name__)
-
-CUENTA_CLOUD_CACHE_TTL = getattr(settings, 'CUENTA_CLOUD_CACHE_TTL', 300)
-EMPRESA_CACHE_TTL = getattr(settings, 'EMPRESA_CACHE_TTL', 300)
 
 
 class CuentaCloudCache:
     """
-    Redis cache for CuentaCloud validation results.
-    Key: cuenta_cloud:{id}:activa → bool
-    TTL: 300 seconds (5 min). Used to minimize calls to Resource Service.
+    Thin pass-through — no in-process cache.
+    services.py calls get_validation() → always returns None (cache miss),
+    which triggers a ResourceServiceClient.validate_cuenta_cloud() call.
     """
-    KEY_PREFIX = 'cuenta_cloud'
-
-    @classmethod
-    def _key(cls, cuenta_id: str) -> str:
-        return f"{cls.KEY_PREFIX}:{cuenta_id}:activa"
 
     @classmethod
     def get_validation(cls, cuenta_id) -> bool | None:
-        """Returns True/False if cached, None if cache miss."""
-        try:
-            value = cache.get(cls._key(str(cuenta_id)))
-            return value
-        except Exception as exc:
-            logger.warning("Redis get error for cuenta_cloud %s: %s", cuenta_id, exc)
-            return None
+        return None  # Always miss — callers fall through to Resource Service HTTP
 
     @classmethod
-    def set_validation(cls, cuenta_id, is_active: bool):
-        try:
-            cache.set(cls._key(str(cuenta_id)), is_active, CUENTA_CLOUD_CACHE_TTL)
-        except Exception as exc:
-            logger.warning("Redis set error for cuenta_cloud %s: %s", cuenta_id, exc)
+    def set_validation(cls, cuenta_id, is_active: bool) -> None:
+        pass  # No-op
 
     @classmethod
-    def invalidate(cls, cuenta_id):
-        try:
-            cache.delete(cls._key(str(cuenta_id)))
-        except Exception as exc:
-            logger.warning("Redis delete error for cuenta_cloud %s: %s", cuenta_id, exc)
+    def invalidate(cls, cuenta_id) -> None:
+        pass  # No-op
 
 
 class EmpresaCache:
     """
-    Redis cache for Empresa active-status lookups.
-    Key: empresa:{id} → dict with {activa, nombre}
-    TTL: 300 seconds (5 min).
+    Thin pass-through — no in-process cache.
+    services.py calls get() → always returns None (cache miss),
+    which triggers a direct Empresa.objects.get() DB query.
+    The Empresa.id column is indexed (PK UUID) so the fallback is fast.
     """
-    KEY_PREFIX = 'empresa'
-
-    @classmethod
-    def _key(cls, empresa_id: str) -> str:
-        return f"{cls.KEY_PREFIX}:{empresa_id}"
 
     @classmethod
     def get(cls, empresa_id) -> dict | None:
-        try:
-            return cache.get(cls._key(str(empresa_id)))
-        except Exception as exc:
-            logger.warning("Redis get error for empresa %s: %s", empresa_id, exc)
-            return None
+        return None  # Always miss — callers fall through to DB
 
     @classmethod
-    def set(cls, empresa_id, data: dict):
-        try:
-            cache.set(cls._key(str(empresa_id)), data, EMPRESA_CACHE_TTL)
-        except Exception as exc:
-            logger.warning("Redis set error for empresa %s: %s", empresa_id, exc)
+    def set(cls, empresa_id, data: dict) -> None:
+        pass  # No-op
 
     @classmethod
-    def invalidate(cls, empresa_id):
-        try:
-            cache.delete(cls._key(str(empresa_id)))
-        except Exception as exc:
-            logger.warning("Redis delete error for empresa %s: %s", empresa_id, exc)
+    def invalidate(cls, empresa_id) -> None:
+        pass  # No-op

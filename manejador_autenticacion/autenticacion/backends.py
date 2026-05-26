@@ -231,6 +231,28 @@ def do_refresh(refresh_token_str):
 
 
 def do_validate(token):
+    """
+    Validate a Bearer token, using Redis cache-aside (300 s TTL).
+
+    Called by ValidateView on every GET /auth/validate request.
+    With caching, only the first call per token incurs a decode/DB hit;
+    subsequent calls within the TTL window are served from Redis.
+    """
+    from .token_cache import get_cached, set_cached
+
+    # 1. Cache hit — return immediately
+    cached = get_cached(token)
+    if cached is not None:
+        return cached
+
+    # 2. Cache miss — validate against source (DB or Cognito)
     if settings.USE_COGNITO:
-        return cognito_validate(token)
-    return local_validate(token)
+        result = cognito_validate(token)
+    else:
+        result = local_validate(token)
+
+    # 3. Cache the result only when validation succeeded
+    if result and result.get('valid'):
+        set_cached(token, result)
+
+    return result

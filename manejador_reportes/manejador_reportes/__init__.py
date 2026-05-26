@@ -1,3 +1,3 @@
-from .celery import app as celery_app
+# Celery removed (PROMPT 3 — replaced by Golang worker pool).
+# celery.py deleted; worker_golang/ handles RabbitMQ consumption.
 
-__all__ = ['celery_app']

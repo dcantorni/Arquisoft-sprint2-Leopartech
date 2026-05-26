@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Waiting for PostgreSQL..."
+echo "Waiting for PostgreSQL (primary)..."
 until python -c "
 import os, psycopg2
 try:
@@ -20,18 +20,12 @@ except Exception as e:
     sleep 2
 done
 
-echo "Running migrations..."
-python manage.py migrate --noinput
+echo "Seeding cloud data (idempotent)..."
+python seed.py
 
-echo "Seeding initial cloud data (ProveedorCloud, CuentaCloud, RecursoCloud, MetricaConsumo)..."
-python manage.py seed_cloud_data
-
-echo "Starting gunicorn..."
-exec gunicorn manejador_cloud.wsgi:application \
-    --bind 0.0.0.0:8002 \
-    --workers "${GUNICORN_WORKERS:-4}" \
-    --threads "${GUNICORN_THREADS:-2}" \
-    --timeout "${GUNICORN_TIMEOUT:-30}" \
-    --access-logfile - \
-    --error-logfile - \
-    --log-level info
+echo "Starting uvicorn on port ${PORT:-8002}..."
+exec uvicorn main:app \
+    --host 0.0.0.0 \
+    --port "${PORT:-8002}" \
+    --workers 4 \
+    --log-level "${LOG_LEVEL:-info}"

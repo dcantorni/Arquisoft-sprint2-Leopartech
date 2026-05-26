@@ -113,9 +113,13 @@ class HealthCheckView(APIView):
         except OperationalError:
             checks['database'] = 'error'
 
+        # Redis token cache health (FIX 1 — added after verification report)
+        from .token_cache import ping as redis_ping
+        checks['redis'] = 'ok' if redis_ping() else 'error'
+
         checks['mode'] = 'cognito' if settings.USE_COGNITO else 'local_jwt'
 
-        all_ok = checks.get('database') == 'ok'
+        all_ok = checks.get('database') == 'ok' and checks.get('redis') == 'ok'
         return Response(
             {
                 'service': 'manejador_autenticacion',

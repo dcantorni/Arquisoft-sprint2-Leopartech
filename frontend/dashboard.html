@@ -127,35 +127,36 @@
               <tr>
                 <th>Nombre</th>
                 <th>Presupuesto</th>
-                <th>Estado</th>
+                <th>Cuenta Cloud</th>
               </tr>
             </thead>
             <tbody id="proyectosTbody"></tbody>
           </table>
-          <div class="empty" id="proyectosEmpty" style="display:none">Sin proyectos.</div>
+          <div class="empty" id="proyectosEmpty" style="display:none">Sin datos disponibles.</div>
         </div>
       </div>
 
-      <!-- Panel 2: Recursos Cloud -->
+      <!-- Panel 2: Cuentas Cloud -->
       <div class="panel">
         <div class="panel-header">
           <h2>Recursos Cloud</h2>
           <span class="badge" id="recursosCount">—</span>
         </div>
         <div class="panel-body">
-          <div class="loading" id="recursosLoading">Cargando recursos…</div>
+          <div class="loading" id="recursosLoading">Cargando cuentas…</div>
           <div class="error-msg" id="recursosError" style="display:none"></div>
           <table id="recursosTable" style="display:none">
             <thead>
               <tr>
                 <th>Nombre</th>
-                <th>Tipo</th>
                 <th>Proveedor</th>
+                <th>Región</th>
+                <th>Activo</th>
               </tr>
             </thead>
             <tbody id="recursosTbody"></tbody>
           </table>
-          <div class="empty" id="recursosEmpty" style="display:none">Sin recursos.</div>
+          <div class="empty" id="recursosEmpty" style="display:none">Sin datos disponibles.</div>
         </div>
       </div>
 
@@ -173,13 +174,15 @@
               <tr>
                 <th>Recurso</th>
                 <th>Tipo</th>
-                <th>Costo (USD)</th>
+                <th>Valor</th>
+                <th>Unidad</th>
                 <th>Período</th>
               </tr>
             </thead>
             <tbody id="metricasTbody"></tbody>
           </table>
-          <div class="empty" id="metricasEmpty" style="display:none">Sin métricas.</div>
+          <div class="empty" id="metricasEmpty" style="display:none">Sin datos disponibles.</div>
+          <div id="metricasUpdated" style="display:none;padding:8px 16px;font-size:0.75rem;color:#999;border-top:1px solid #f0f0f0;"></div>
         </div>
       </div>
 
@@ -222,26 +225,29 @@
     }
 
     // ── Proyectos ─────────────────────────────────────────────────────────────
+    // Path: GET CONFIG.USUARIOS_URL (= API_BASE_URL/projects)
     async function loadProyectos() {
       try {
-        const resp = await apiFetch(`${CONFIG.USUARIOS_URL}/projects`);
+        const resp = await apiFetch(`${CONFIG.USUARIOS_URL}`);
         const data = await resp.json();
         const tbody = document.getElementById('proyectosTbody');
         document.getElementById('proyectosLoading').style.display = 'none';
-        if (!Array.isArray(data) || data.length === 0) {
+        const items = Array.isArray(data) ? data : (data.results || []);
+        if (items.length === 0) {
           document.getElementById('proyectosEmpty').style.display = 'block';
           return;
         }
-        document.getElementById('proyectosCount').textContent = data.length;
-        data.forEach(p => {
+        document.getElementById('proyectosCount').textContent = items.length;
+        items.forEach(p => {
           const tr = document.createElement('tr');
+          const cuenta = p.cuenta_cloud_nombre || p.cuenta_cloud_id || '—';
           const presupuesto = p.presupuesto
             ? `${parseFloat(p.presupuesto.monto_mensual).toLocaleString('es')} ${p.presupuesto.moneda}`
             : '—';
           tr.innerHTML = `
             <td>${escHtml(p.nombre)}</td>
             <td>${escHtml(presupuesto)}</td>
-            <td><span class="badge-active">${escHtml(p.estado)}</span></td>
+            <td>${escHtml(cuenta)}</td>
           `;
           tbody.appendChild(tr);
         });
@@ -249,15 +255,16 @@
       } catch (e) {
         if (e.message !== 'Unauthorized') {
           document.getElementById('proyectosLoading').style.display = 'none';
-          showPanelError('proyectosError', 'No se pudieron cargar los proyectos.');
+          showPanelError('proyectosError', 'Error al cargar datos');
         }
       }
     }
 
-    // ── Recursos Cloud ────────────────────────────────────────────────────────
+    // ── Cuentas Cloud (Panel 2) ───────────────────────────────────────────────
+    // Path: GET CONFIG.CLOUD_URL/cloud-accounts (= API_BASE_URL/cloud/cloud-accounts)
     async function loadRecursos() {
       try {
-        const resp = await apiFetch(`${CONFIG.CLOUD_URL}/resources`);
+        const resp = await apiFetch(`${CONFIG.CLOUD_URL}/cloud-accounts`);
         const data = await resp.json();
         const tbody = document.getElementById('recursosTbody');
         document.getElementById('recursosLoading').style.display = 'none';
@@ -267,12 +274,16 @@
           return;
         }
         document.getElementById('recursosCount').textContent = items.length;
-        items.slice(0, 20).forEach(r => {
+        items.slice(0, 20).forEach(c => {
           const tr = document.createElement('tr');
+          const activaBadge = c.activa
+            ? '<span class="badge-active">Activo</span>'
+            : '<span style="color:#aaa;font-size:0.8rem;">Inactivo</span>';
           tr.innerHTML = `
-            <td>${escHtml(r.nombre)}</td>
-            <td>${escHtml(r.tipo)}</td>
-            <td>${escHtml(r.proveedor_tipo || '—')}</td>
+            <td>${escHtml(c.nombre)}</td>
+            <td>${escHtml(c.proveedor_tipo || c.proveedor || '—')}</td>
+            <td>${escHtml(c.region || '—')}</td>
+            <td>${activaBadge}</td>
           `;
           tbody.appendChild(tr);
         });
@@ -280,13 +291,21 @@
       } catch (e) {
         if (e.message !== 'Unauthorized') {
           document.getElementById('recursosLoading').style.display = 'none';
-          showPanelError('recursosError', 'No se pudieron cargar los recursos cloud.');
+          showPanelError('recursosError', 'Error al cargar datos');
         }
       }
     }
 
-    // ── Métricas de Costo ─────────────────────────────────────────────────────
+    // ── Métricas de Costo (Panel 3) — auto-refresh every 30 s ────────────────
+    // Path: GET CONFIG.CLOUD_URL/metrics (= API_BASE_URL/cloud/metrics)
     async function loadMetricas() {
+      // Reset table for re-renders (auto-refresh)
+      document.getElementById('metricasTbody').innerHTML = '';
+      document.getElementById('metricasTable').style.display = 'none';
+      document.getElementById('metricasEmpty').style.display = 'none';
+      document.getElementById('metricasError').style.display = 'none';
+      document.getElementById('metricasLoading').style.display = 'block';
+
       try {
         const resp = await apiFetch(`${CONFIG.CLOUD_URL}/metrics`);
         const data = await resp.json();
@@ -295,24 +314,36 @@
         const items = Array.isArray(data) ? data : (data.results || []);
         if (items.length === 0) {
           document.getElementById('metricasEmpty').style.display = 'block';
-          return;
+        } else {
+          document.getElementById('metricasCount').textContent = items.length;
+          items.slice(0, 20).forEach(m => {
+            const tr = document.createElement('tr');
+            const valor = m.valor !== undefined && m.valor !== null
+              ? parseFloat(m.valor).toLocaleString('es', { maximumFractionDigits: 4 })
+              : '—';
+            const periodo = (m.periodo_inicio && m.periodo_fin)
+              ? `${escHtml(m.periodo_inicio)} → ${escHtml(m.periodo_fin)}`
+              : (m.periodo_inicio ? escHtml(m.periodo_inicio) : '—');
+            tr.innerHTML = `
+              <td>${escHtml(m.recurso_nombre || m.recurso_id || '—')}</td>
+              <td>${escHtml(m.tipo_metrica || '—')}</td>
+              <td>${escHtml(valor)}</td>
+              <td>${escHtml(m.unidad || '—')}</td>
+              <td>${periodo}</td>
+            `;
+            tbody.appendChild(tr);
+          });
+          document.getElementById('metricasTable').style.display = '';
         }
-        document.getElementById('metricasCount').textContent = items.length;
-        items.slice(0, 20).forEach(m => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td>${escHtml(m.recurso_nombre || '—')}</td>
-            <td>${escHtml(m.tipo_metrica)}</td>
-            <td>$${parseFloat(m.costo || 0).toFixed(2)}</td>
-            <td>${escHtml(m.periodo_inicio)} → ${escHtml(m.periodo_fin)}</td>
-          `;
-          tbody.appendChild(tr);
-        });
-        document.getElementById('metricasTable').style.display = '';
+        // Last updated timestamp
+        const ts = new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const updEl = document.getElementById('metricasUpdated');
+        updEl.textContent = `Actualizado: ${ts}`;
+        updEl.style.display = 'block';
       } catch (e) {
         if (e.message !== 'Unauthorized') {
           document.getElementById('metricasLoading').style.display = 'none';
-          showPanelError('metricasError', 'No se pudieron cargar las métricas.');
+          showPanelError('metricasError', 'Error al cargar datos');
         }
       }
     }
@@ -334,6 +365,9 @@
     loadProyectos();
     loadRecursos();
     loadMetricas();
+
+    // Auto-refresh metrics panel every 30 seconds (architecture.md §2.2 cache TTL)
+    setInterval(() => loadMetricas(), 30000);
   </script>
 </body>
 </html>

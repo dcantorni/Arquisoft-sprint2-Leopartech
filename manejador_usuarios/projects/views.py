@@ -77,14 +77,7 @@ class HealthCheckView(APIView):
         except OperationalError:
             checks['database'] = 'error'
 
-        # Redis
-        try:
-            from django.core.cache import cache
-            cache.set('_health', '1', 5)
-            checks['redis'] = 'ok' if cache.get('_health') == '1' else 'error'
-        except Exception:
-            checks['redis'] = 'error'
-
+        # CHANGE 4: Redis removed from manejador_usuarios — health check DB-only
         all_ok = all(v == 'ok' for v in checks.values())
         http_status = status.HTTP_200_OK if all_ok else status.HTTP_503_SERVICE_UNAVAILABLE
         return Response(

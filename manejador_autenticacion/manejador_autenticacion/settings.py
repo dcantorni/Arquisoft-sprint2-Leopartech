@@ -45,6 +45,13 @@ LOCAL_JWT_SECRET = os.environ.get('LOCAL_JWT_SECRET', 'local-dev-jwt-secret-chan
 LOCAL_JWT_ACCESS_EXPIRY = int(os.environ.get('LOCAL_JWT_ACCESS_EXPIRY', '3600'))
 LOCAL_JWT_REFRESH_EXPIRY = int(os.environ.get('LOCAL_JWT_REFRESH_EXPIRY', '86400'))
 
+# ── Redis token-validation cache (DB 0) ──────────────────────────────────────
+# Cache-aside: GET /auth/validate results are stored for TOKEN_CACHE_TTL seconds.
+# Eliminates repeated DB/Cognito round-trips on every cross-service auth check.
+# Falls back to direct validation on Redis errors (non-blocking).
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+TOKEN_CACHE_TTL = 300  # 5 minutes — must be ≤ LOCAL_JWT_ACCESS_EXPIRY
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,

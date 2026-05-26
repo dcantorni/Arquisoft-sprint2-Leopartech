@@ -1,0 +1,383 @@
+version: "3.9"
+
+# ── Shared networks ────────────────────────────────────────────────────────
+networks:
+  bite_net:
+    driver: bridge
+
+# ── Named volumes ─────────────────────────────────────────────────────────
+volumes:
+  pg_seguridad:
+  pg_usuarios:
+  pg_reportes:
+  pg_cloud:
+  rabbitmq_data:
+  redis_data:
+
+# =============================================================================
+# INFRASTRUCTURE
+# =============================================================================
+services:
+
+  # ── PostgreSQL: seguridad_db (shared by autenticacion + seguridad) ────────
+  postgres_seguridad:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: seguridad_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_seguridad:/var/lib/postgresql/data
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d seguridad_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── PostgreSQL: usuarios_db ───────────────────────────────────────────────
+  postgres_usuarios:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: usuarios_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_usuarios:/var/lib/postgresql/data
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d usuarios_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── PostgreSQL: reportes_db ───────────────────────────────────────────────
+  postgres_reportes:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: reportes_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_reportes:/var/lib/postgresql/data
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d reportes_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── PostgreSQL: cloud_db ──────────────────────────────────────────────────
+  postgres_cloud:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: cloud_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_cloud:/var/lib/postgresql/data
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cloud_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (DB 0 = autenticacion token cache, DB 1 = cloud dashboard) ─────
+  # CHANGE 4: Only manejador_autenticacion (DB 0) and manejador_cloud (DB 1) connect.
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── RabbitMQ ──────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_VHOST: bite_vhost
+      RABBITMQ_DEFAULT_USER: bite
+      RABBITMQ_DEFAULT_PASS: bite_pass
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "15672:15672"  # Management UI (local access only)
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+# =============================================================================
+# APPLICATION SERVICES
+# =============================================================================
+
+  # ── manejador_autenticacion — port 8004 ──────────────────────────────────
+  # CHANGE 4: REDIS_URL kept (DB 0 = token cache)
+  manejador_autenticacion:
+    build:
+      context: ./manejador_autenticacion
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      DATABASE_HOST: postgres_seguridad
+      DATABASE_NAME: seguridad_db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_JWT_SECRET: local-dev-jwt-secret-change-in-production
+      LOCAL_JWT_ACCESS_EXPIRY: "3600"
+      LOCAL_JWT_REFRESH_EXPIRY: "86400"
+      COGNITO_USER_POOL_ID: ""
+      COGNITO_CLIENT_ID: ""
+      COGNITO_REGION: us-east-1
+      DEBUG: "False"
+      SECRET_KEY: bite-terraform-secret-key
+      ALLOWED_HOSTS: "*"
+    depends_on:
+      postgres_seguridad:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ── manejador_seguridad — port 8005 ──────────────────────────────────────
+  # CHANGE 4: No Redis (seguridad never used it)
+  manejador_seguridad:
+    build:
+      context: ./manejador_seguridad
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      DATABASE_HOST: postgres_seguridad
+      DATABASE_NAME: seguridad_db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_PORT: "5432"
+      AUTH_SERVICE_URL: http://manejador_autenticacion:8004
+      AUTH_SERVICE_TIMEOUT: "2"
+      LOCAL_JWT_SECRET: local-dev-jwt-secret-change-in-production
+      DEBUG: "False"
+      SECRET_KEY: bite-terraform-secret-key
+      ALLOWED_HOSTS: "*"
+    depends_on:
+      postgres_seguridad:
+        condition: service_healthy
+      manejador_autenticacion:
+        condition: service_healthy
+    networks:
+      - bite_net
+
+  # ── manejador_cloud — port 8002 (FastAPI, CHANGE 2 rewrite) ──────────────
+  # CHANGE 4: REDIS_URL kept (DB 1 = dashboard cache, 30 s TTL)
+  manejador_cloud:
+    build:
+      context: ./manejador_cloud
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_HOST: postgres_cloud        # write — primary
+      DATABASE_READ_HOST: postgres_cloud   # read — same host in local dev (no replica)
+      DATABASE_NAME: cloud_db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_PORT: "5432"
+      REDIS_URL: redis://redis:6379/1
+      CLOUD_CACHE_TTL: "30"
+      AUTH_SERVICE_URL: http://manejador_autenticacion:8004
+      AUTH_SERVICE_TIMEOUT: "2"
+      LOCAL_JWT_SECRET: local-dev-jwt-secret-change-in-production
+      LOG_LEVEL: INFO
+      PORT: "8002"
+    depends_on:
+      postgres_cloud:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      manejador_autenticacion:
+        condition: service_healthy
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ── manejador_usuarios — port 8001 ───────────────────────────────────────
+  # CHANGE 4: REDIS_URL removed entirely
+  manejador_usuarios:
+    build:
+      context: ./manejador_usuarios
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_HOST: postgres_usuarios
+      DATABASE_NAME: usuarios_db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_PORT: "5432"
+      RABBITMQ_URL: amqp://bite:bite_pass@rabbitmq:5672/bite_vhost
+      RABBITMQ_EXCHANGE: bite_events
+      RABBITMQ_ROUTING_KEY_PROJECT: proyecto.creado
+      RESOURCE_SERVICE_URL: http://manejador_cloud:8002
+      RESOURCE_SERVICE_TIMEOUT: "2"
+      AUTH_SERVICE_URL: http://manejador_autenticacion:8004
+      AUTH_SERVICE_TIMEOUT: "10"
+      LOCAL_JWT_SECRET: local-dev-jwt-secret-change-in-production
+      DEBUG: "True"
+      SECRET_KEY: bite-terraform-secret-key
+      ALLOWED_HOSTS: "*"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+    depends_on:
+      postgres_usuarios:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      manejador_cloud:
+        condition: service_healthy
+      manejador_autenticacion:
+        condition: service_healthy
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ── manejador_reportes — port 8003 ───────────────────────────────────────
+  # PROMPT 3: REDIS_URL + Celery removed. publishes to RabbitMQ via pika.
+  # Golang worker_golang/ handles async consumption.
+  manejador_reportes:
+    build:
+      context: ./manejador_reportes
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_HOST: postgres_reportes
+      DATABASE_NAME: reportes_db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_PORT: "5432"
+      RABBITMQ_URL: amqp://bite:bite_pass@rabbitmq:5672/bite_vhost
+      RABBITMQ_EXCHANGE: bite_events
+      AUTH_SERVICE_URL: http://manejador_autenticacion:8004
+      AUTH_SERVICE_TIMEOUT: "2"
+      LOCAL_JWT_SECRET: local-dev-jwt-secret-change-in-production
+      DEBUG: "True"
+      SECRET_KEY: bite-terraform-secret-key
+      ALLOWED_HOSTS: "*"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+    depends_on:
+      postgres_reportes:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      manejador_autenticacion:
+        condition: service_healthy
+    networks:
+      - bite_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ── reportes_worker (Golang) — PROMPT 3: replaced Python Celery worker ───────
+  # Consumes from bite_events topic exchange:
+  #   bite.eventos   (evento.#)   → handlers.HandleEvento
+  #   bite.proyectos (proyecto.*) → handlers.HandleProyecto
+  # Health: GET http://reportes_worker:8006/health
+  reportes_worker:
+    build:
+      context: ./worker_golang
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8006"
+    environment:
+      RABBITMQ_URL: amqp://bite:bite_pass@rabbitmq:5672/bite_vhost
+      DATABASE_HOST: postgres_reportes
+      DATABASE_NAME: reportes_db
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_MAX_CONNS: "20"
+      WORKER_CONCURRENCY: "10"
+      PORT: "8006"
+    depends_on:
+      postgres_reportes:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - bite_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # ── nginx — frontend + reverse proxy ─────────────────────────────────────
+  # PROMPT 4: single entry point on :8080
+  # Routes: /auth/ → autenticacion, /projects → usuarios, /cloud/ → cloud,
+  #         /events → reportes, /security → seguridad, / → static HTML
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      manejador_autenticacion:
+        condition: service_healthy
+      manejador_usuarios:
+        condition: service_healthy
+      manejador_cloud:
+        condition: service_healthy
+      manejador_reportes:
+        condition: service_healthy
+    networks:
+      - bite_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

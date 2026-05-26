@@ -36,19 +36,8 @@ DATABASES = {
     }
 }
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.environ.get('REDIS_URL', 'redis://redis:6379/0'),
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'SOCKET_CONNECT_TIMEOUT': 5,
-            'SOCKET_TIMEOUT': 5,
-            'IGNORE_EXCEPTIONS': True,
-        },
-        'TIMEOUT': int(os.environ.get('REDIS_CACHE_TTL', '300')),
-    }
-}
+# CHANGE 4: Redis removed from manejador_usuarios. Cache replaced with direct
+# indexed DB queries (Empresa.id, CuentaCloud validated via Resource Service HTTP).
 
 # Email backend (terraform injects this; default is console for local dev)
 EMAIL_BACKEND = os.environ.get(
@@ -71,9 +60,6 @@ SEGURIDAD_URL = os.environ.get('SEGURIDAD_URL', 'http://manejador-seguridad:8005
 LOCAL_JWT_SECRET = os.environ.get('LOCAL_JWT_SECRET', 'local-dev-jwt-secret-change-in-production')
 RESOURCE_SERVICE_TIMEOUT = int(os.environ.get('RESOURCE_SERVICE_TIMEOUT', '2'))
 
-# Cache TTLs (seconds)
-CUENTA_CLOUD_CACHE_TTL = int(os.environ.get('CUENTA_CLOUD_CACHE_TTL', '300'))
-EMPRESA_CACHE_TTL = int(os.environ.get('EMPRESA_CACHE_TTL', '300'))
 
 LOGGING = {
     'version': 1,
