@@ -526,8 +526,7 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot    = true
   publicly_accessible    = false
   deletion_protection    = false
-  # Required for read replica: automated backups must be enabled
-  backup_retention_period = 1
+  backup_retention_period = 1  # required for read replica (aws_db_instance.cloud_read_replica)
 
   tags = merge(local.common_tags, {
     Name = "${var.project_prefix}-postgres"
