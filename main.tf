@@ -143,8 +143,10 @@ locals {
   }
 
   # Django ALLOWED_HOSTS: '*' is ignored when DEBUG=False; include ALB DNS + internal names.
+  # Auth uses the same list — private IP not included here to avoid Terraform cycle
+  # (auth instance user_data ↔ auth private_ip). Reportes middleware falls back to local JWT
+  # when auth validate returns non-200 (e.g. Host header = private IP).
   django_allowed_hosts = "localhost,127.0.0.1,${aws_lb.main.dns_name},.elb.amazonaws.com,.amazonaws.com"
-  auth_allowed_hosts   = "${local.django_allowed_hosts},${aws_instance.manejador_autenticacion.private_ip}"
 
   # Build and run worker_golang (ASR15 async consumer — replaces Celery)
   worker_golang_bootstrap = <<-SCRIPT
@@ -789,7 +791,7 @@ resource "aws_instance" "manejador_autenticacion" {
     COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     COGNITO_REGION=${var.region}
     LOCAL_JWT_SECRET=bite-local-jwt-secret
-    ALLOWED_HOSTS=${local.auth_allowed_hosts}
+    ALLOWED_HOSTS=${local.django_allowed_hosts}
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     ENV
@@ -804,7 +806,7 @@ resource "aws_instance" "manejador_autenticacion" {
     export COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     export COGNITO_REGION=${var.region}
     export LOCAL_JWT_SECRET=bite-local-jwt-secret
-    export ALLOWED_HOSTS=${local.auth_allowed_hosts}
+    export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
