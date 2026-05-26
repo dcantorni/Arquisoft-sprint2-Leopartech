@@ -56,9 +56,15 @@ variable "branch" {
 }
 
 variable "celery_worker_concurrency" {
-  description = "Number of concurrent Celery worker processes per worker instance (ASR17)"
+  description = "Concurrent message handlers for worker_golang (AMQP prefetch / goroutine pool)"
   type        = number
-  default     = 4
+  default     = 10
+}
+
+variable "simulate_slow_processing" {
+  description = "When true, worker_golang sleeps 3s per event to demo ASR15 slow-path notifications"
+  type        = string
+  default     = "false"
 }
 
 # Instance types - kept at the smallest viable size for AWS Academy budget
@@ -135,6 +141,22 @@ locals {
     Project   = local.project_name
     ManagedBy = "Terraform"
   }
+
+  # Django ALLOWED_HOSTS: '*' is ignored when DEBUG=False; include ALB DNS + internal names.
+  django_allowed_hosts = "localhost,127.0.0.1,${aws_lb.main.dns_name},.elb.amazonaws.com,.amazonaws.com"
+  auth_allowed_hosts   = "${local.django_allowed_hosts},${aws_instance.manejador_autenticacion.private_ip}"
+
+  # Build and run worker_golang (ASR15 async consumer — replaces Celery)
+  worker_golang_bootstrap = <<-SCRIPT
+    GO_VERSION=1.21.13
+    curl -fsSL https://go.dev/dl/go$${GO_VERSION}.linux-amd64.tar.gz -o /tmp/go.tar.gz
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+    export PATH=$PATH:/usr/local/go/bin
+    cd ${local.repo_dir}/worker_golang
+    /usr/local/go/bin/go mod download
+    CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o worker_golang .
+  SCRIPT
 
   # Shared startup script: clones the repo and waits for dependencies
   # Usage: interpolate after setting env vars in each user_data block
@@ -658,10 +680,8 @@ resource "aws_instance" "manejador_cloud" {
 }
 
 # -----------------------------------------------------------------------------
-# CELERY WORKER POOL
-# architecture.md §4.1 - Worker Pool for ASR17
-# CHANGE 4: REDIS_URL removed; CELERY_RESULT_BACKEND moved to PostgreSQL.
-#           Worker no longer waits for Redis at startup.
+# WORKER GOLANG POOL — ASR15 async event consumer (replaces Celery)
+# Consumes bite.eventos from RabbitMQ and persists to reportes_db.
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "worker_pool" {
@@ -695,12 +715,11 @@ resource "aws_instance" "worker_pool" {
     DATABASE_NAME=reportes_db
     DATABASE_USER=reportes_user
     DATABASE_PASSWORD=Reportes_2024!
-    CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
+    DATABASE_MAX_CONNS=20
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    CELERY_WORKER_CONCURRENCY=${var.celery_worker_concurrency}
-    DEBUG=True
-    SECRET_KEY=bite-terraform-secret-key
+    WORKER_CONCURRENCY=${var.celery_worker_concurrency}
+    PORT=8006
+    SIMULATE_SLOW_PROCESSING=${var.simulate_slow_processing}
     ENV
 
     export DATABASE_HOST=${aws_db_instance.main.address}
@@ -708,30 +727,26 @@ resource "aws_instance" "worker_pool" {
     export DATABASE_NAME=reportes_db
     export DATABASE_USER=reportes_user
     export DATABASE_PASSWORD='Reportes_2024!'
-    export CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
+    export DATABASE_MAX_CONNS=20
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export CELERY_WORKER_CONCURRENCY=${var.celery_worker_concurrency}
-    export DEBUG=True
-    export SECRET_KEY=bite-terraform-secret-key
+    export WORKER_CONCURRENCY=${var.celery_worker_concurrency}
+    export PORT=8006
+    export SIMULATE_SLOW_PROCESSING=${var.simulate_slow_processing}
 
     ${local.git_bootstrap}
 
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
     until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
 
-    cd ${local.repo_dir}/manejador_reportes
-    sudo python3 -m pip install -r requirements.txt
-    # Celery reads directly from RabbitMQ - no pika consumer middleman
-    nohup python3 -m celery -A manejador_reportes.celery worker \
-      --loglevel=info \
-      --concurrency=${var.celery_worker_concurrency} \
-      > /var/log/bite-worker-${each.key}.log 2>&1 &
+    ${local.worker_golang_bootstrap}
+
+    cd ${local.repo_dir}/worker_golang
+    nohup ./worker_golang > /var/log/worker_golang.log 2>&1 &
   EOT
 
   tags = merge(local.common_tags, {
     Name = "${var.project_prefix}-worker-${each.key}"
-    Role = "worker"
+    Role = "worker-golang"
   })
 }
 
@@ -774,8 +789,8 @@ resource "aws_instance" "manejador_autenticacion" {
     COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     COGNITO_REGION=${var.region}
     LOCAL_JWT_SECRET=bite-local-jwt-secret
-    ALLOWED_HOSTS=*
-    DEBUG=False
+    ALLOWED_HOSTS=${local.auth_allowed_hosts}
+    DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     ENV
 
@@ -789,8 +804,8 @@ resource "aws_instance" "manejador_autenticacion" {
     export COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     export COGNITO_REGION=${var.region}
     export LOCAL_JWT_SECRET=bite-local-jwt-secret
-    export ALLOWED_HOSTS=*
-    export DEBUG=False
+    export ALLOWED_HOSTS=${local.auth_allowed_hosts}
+    export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
     sudo apt-get install -y postgresql-client
@@ -861,8 +876,8 @@ resource "aws_instance" "manejador_seguridad" {
     COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
     COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     COGNITO_REGION=${var.region}
-    ALLOWED_HOSTS=*
-    DEBUG=False
+    ALLOWED_HOSTS=${local.django_allowed_hosts}
+    DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     ENV
 
@@ -877,8 +892,8 @@ resource "aws_instance" "manejador_seguridad" {
     export COGNITO_USER_POOL_ID=${aws_cognito_user_pool.bite.id}
     export COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.bite_spa.id}
     export COGNITO_REGION=${var.region}
-    export ALLOWED_HOSTS=*
-    export DEBUG=False
+    export ALLOWED_HOSTS=${local.django_allowed_hosts}
+    export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
     ${local.git_bootstrap}
@@ -1177,7 +1192,7 @@ resource "aws_launch_template" "usuarios" {
     RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
     AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     AUTH_SERVICE_TIMEOUT=10
-    ALLOWED_HOSTS=*
+    ALLOWED_HOSTS=${local.django_allowed_hosts}
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
@@ -1192,7 +1207,7 @@ resource "aws_launch_template" "usuarios" {
     export RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
     export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     export AUTH_SERVICE_TIMEOUT=10
-    export ALLOWED_HOSTS=*
+    export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
@@ -1336,7 +1351,7 @@ resource "aws_launch_template" "reportes" {
     }
   }
 
-  # CHANGE 4: REDIS_URL removed; CELERY_RESULT_BACKEND moved to PostgreSQL
+  # ASR15: pika async publisher + worker_golang consumer (Celery removed)
   user_data = base64encode(<<-EOT
     #!/bin/bash
     set -euxo pipefail
@@ -1348,13 +1363,18 @@ resource "aws_launch_template" "reportes" {
     DATABASE_NAME=reportes_db
     DATABASE_USER=reportes_user
     DATABASE_PASSWORD=Reportes_2024!
-    CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    ALLOWED_HOSTS=*
+    RABBITMQ_EXCHANGE=bite_events
+    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    AUTH_SERVICE_TIMEOUT=2
+    LOCAL_JWT_SECRET=bite-local-jwt-secret
+    ALLOWED_HOSTS=${local.django_allowed_hosts}
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+    GUNICORN_WORKERS=2
+    GUNICORN_THREADS=2
+    GUNICORN_TIMEOUT=30
     ENV
 
     export DATABASE_HOST=${aws_db_instance.main.address}
@@ -1362,10 +1382,12 @@ resource "aws_launch_template" "reportes" {
     export DATABASE_NAME=reportes_db
     export DATABASE_USER=reportes_user
     export DATABASE_PASSWORD='Reportes_2024!'
-    export CELERY_RESULT_BACKEND=db+postgresql://reportes_user:Reportes_2024!@${aws_db_instance.main.address}/reportes_db
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export CELERY_BROKER_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export ALLOWED_HOSTS=*
+    export RABBITMQ_EXCHANGE=bite_events
+    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export AUTH_SERVICE_TIMEOUT=2
+    export LOCAL_JWT_SECRET=bite-local-jwt-secret
+    export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
@@ -1375,6 +1397,7 @@ resource "aws_launch_template" "reportes" {
 
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
     until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
+    until nc -z ${aws_instance.manejador_autenticacion.private_ip} 8004; do sleep 5; done
 
     PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
       -c "CREATE DATABASE reportes_db;" || true
@@ -1389,7 +1412,14 @@ resource "aws_launch_template" "reportes" {
     sudo python3 -m pip install -r requirements.txt
     python3 manage.py migrate --noinput || true
     python3 manage.py seed_reportes_data || true
-    nohup python3 manage.py runserver 0.0.0.0:8003 > /var/log/manejador_reportes.log 2>&1 &
+    nohup gunicorn manejador_reportes.wsgi:application \
+      --bind 0.0.0.0:8003 \
+      --workers 2 \
+      --threads 2 \
+      --timeout 30 \
+      --access-logfile - \
+      --error-logfile - \
+      > /var/log/manejador_reportes.log 2>&1 &
   EOT
   )
 
@@ -1871,8 +1901,13 @@ output "cloud_read_replica_endpoint" {
 }
 
 output "worker_public_ips" {
-  description = "Celery worker pool public IPs - for SSH debugging"
+  description = "worker_golang pool public IPs - for SSH debugging"
   value       = { for id, instance in aws_instance.worker_pool : id => instance.public_ip }
+}
+
+output "simulate_slow_processing" {
+  description = "ASR15 demo flag — set to true to enable 3s sleep in worker_golang"
+  value       = var.simulate_slow_processing
 }
 
 output "cognito_user_pool_id" {

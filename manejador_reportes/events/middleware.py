@@ -58,7 +58,11 @@ class TenantAuthMiddleware:
             )
             if resp.status_code == 200:
                 return resp.json().get('empresa_id')
-            return None
+            logger.warning(
+                "Auth service returned %s — falling back to local JWT validation",
+                resp.status_code,
+            )
+            return self._validate_locally(token)
         except requests.RequestException as e:
             logger.warning("Auth service unreachable: %s — falling back to local validation", e)
             return self._validate_locally(token)

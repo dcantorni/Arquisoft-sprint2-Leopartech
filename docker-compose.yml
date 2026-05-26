@@ -149,9 +149,9 @@ services:
       COGNITO_USER_POOL_ID: ""
       COGNITO_CLIENT_ID: ""
       COGNITO_REGION: us-east-1
-      DEBUG: "False"
+      DEBUG: "True"
       SECRET_KEY: bite-terraform-secret-key
-      ALLOWED_HOSTS: "*"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,manejador_autenticacion,manejador_reportes"
     depends_on:
       postgres_seguridad:
         condition: service_healthy
@@ -298,7 +298,7 @@ services:
       LOCAL_JWT_SECRET: local-dev-jwt-secret-change-in-production
       DEBUG: "True"
       SECRET_KEY: bite-terraform-secret-key
-      ALLOWED_HOSTS: "*"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,manejador_autenticacion,manejador_reportes"
       EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
     depends_on:
       postgres_reportes:
