@@ -1826,6 +1826,24 @@ resource "aws_s3_object" "frontend_metrics" {
   depends_on   = [aws_s3_bucket_public_access_block.frontend, aws_s3_bucket_policy.frontend_public]
 }
 
+resource "aws_s3_object" "frontend_reports" {
+  bucket       = aws_s3_bucket.frontend.id
+  key          = "reports.html"
+  source       = "${path.module}/frontend/reports.html"
+  content_type = "text/html"
+  etag         = filemd5("${path.module}/frontend/reports.html")
+  depends_on   = [aws_s3_bucket_public_access_block.frontend, aws_s3_bucket_policy.frontend_public]
+}
+
+resource "aws_s3_object" "frontend_users" {
+  bucket       = aws_s3_bucket.frontend.id
+  key          = "users.html"
+  source       = "${path.module}/frontend/users.html"
+  content_type = "text/html"
+  etag         = filemd5("${path.module}/frontend/users.html")
+  depends_on   = [aws_s3_bucket_public_access_block.frontend, aws_s3_bucket_policy.frontend_public]
+}
+
 # -----------------------------------------------------------------------------
 # CHANGE 5 — LAMBDA + EVENTBRIDGE (cloud_collector)
 # Runs every 6 hours to collect AWS Cost Explorer data into cloud_db (primary).

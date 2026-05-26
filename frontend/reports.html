@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BITE.co — Reportes y Análisis</title>
+  <script src="config.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Outfit', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    header {
+      background: rgba(30, 41, 59, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 50;
+    }
+    header .logo { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.5px; color: #fff; }
+    header .logo span { background: linear-gradient(90deg, #4cc9f0, #4361ee); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    header .user-info { display: flex; align-items: center; gap: 20px; font-size: 0.9rem; }
+    header .user-info span { opacity: 0.9; font-weight: 600; }
+    header nav { display: flex; align-items: center; gap: 24px; font-size: 0.95rem; }
+    header nav a { color: rgba(255,255,255,0.7); text-decoration: none; font-weight: 600; transition: color 0.2s; }
+    header nav a:hover { color: #4cc9f0; }
+    header nav a.active { color: #fff; border-bottom: 2px solid #4cc9f0; padding-bottom: 4px; }
+    button.logout { background: rgba(239, 35, 60, 0.1); border: 1px solid rgba(239, 35, 60, 0.3); color: #ff4d6d; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; font-weight: 600; font-family: inherit; transition: all 0.2s; }
+    button.logout:hover { background: rgba(239, 35, 60, 0.2); }
+
+    .page-title { padding: 32px 32px 0; max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: flex-end; }
+    .page-title h1 { font-size: 2rem; font-weight: 800; margin-bottom: 8px; color: #fff; }
+    .page-title p { color: #94a3b8; font-size: 0.95rem; }
+
+    main { padding: 24px 32px 40px; max-width: 1200px; margin: 0 auto; }
+
+    .panel { background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.2); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th { background: rgba(0,0,0,0.2); text-align: left; padding: 16px 24px; font-weight: 600; color: #94a3b8; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 16px 24px; border-top: 1px solid rgba(255,255,255,0.05); color: #cbd5e1; }
+    tr:hover td { background: rgba(255,255,255,0.03); }
+    
+    .status-badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 800; border: 1px solid transparent; }
+    .status-COMPLETED { background: rgba(6, 214, 160, 0.15); color: #06d6a0; border-color: rgba(6, 214, 160, 0.3); }
+    .status-PENDING { background: rgba(255, 159, 28, 0.15); color: #ff9f1c; border-color: rgba(255, 159, 28, 0.3); }
+    .status-FAILED { background: rgba(239, 35, 60, 0.15); color: #ef233c; border-color: rgba(239, 35, 60, 0.3); }
+
+    .action-btn { background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #4cc9f0; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; font-family: inherit; transition: all 0.2s; }
+    .action-btn:hover { background: rgba(76, 201, 240, 0.1); border-color: #4cc9f0; }
+    .action-btn:disabled { color: #64748b; border-color: rgba(255,255,255,0.1); cursor: not-allowed; }
+    .action-btn:disabled:hover { background: transparent; border-color: rgba(255,255,255,0.1); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">BITE<span>.co</span></div>
+    <nav>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="metrics.html">Métricas</a>
+      <a href="reports.html" class="active">Reportes</a>
+      <a href="users.html" id="usersLink" style="display:none">Usuarios</a>
+    </nav>
+    <div class="user-info">
+      <span id="headerEmail">Cargando…</span>
+      <button class="logout" onclick="logout()">Cerrar sesión</button>
+    </div>
+  </header>
+
+  <div class="page-title">
+    <div>
+      <h1>Historial de Reportes y Análisis</h1>
+      <p>Consultas en segundo plano procesadas por Celery / RabbitMQ.</p>
+    </div>
+  </div>
+
+  <main>
+    <div class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th>ID Tarea</th>
+            <th>Tipo de Análisis</th>
+            <th>Fecha Solicitud</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="reportsTbody">
+          <!-- Mock data -->
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    const token = localStorage.getItem('access_token');
+    const email = localStorage.getItem('user_email') || '';
+    const rol   = localStorage.getItem('user_rol') || 'ANALYST';
+
+    if (!token) {
+      window.location.href = 'index.html';
+    }
+
+    document.getElementById('headerEmail').textContent = email;
+
+    if (rol === 'ADMIN') {
+      document.getElementById('usersLink').style.display = 'inline-block';
+    }
+
+    function logout() {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('user_email');
+      localStorage.removeItem('user_rol');
+      window.location.href = 'index.html';
+    }
+
+    function loadReports() {
+      const tbody = document.getElementById('reportsTbody');
+      
+      const reports = [
+        { id: 'JOB-9842', tipo: 'Análisis Profundo de Desperdicio', fecha: '2026-02-28 14:30:00', status: 'PENDING' },
+        { id: 'JOB-9841', tipo: 'Auditoría Mensual Costos', fecha: '2026-02-27 09:00:00', status: 'COMPLETED' },
+        { id: 'JOB-9840', tipo: 'Detección Anomalías AWS', fecha: '2026-02-25 11:15:00', status: 'COMPLETED' },
+        { id: 'JOB-9839', tipo: 'Optimización de Instancias', fecha: '2026-02-20 16:45:00', status: 'FAILED' }
+      ];
+
+      reports.forEach(r => {
+        const tr = document.createElement('tr');
+        
+        let stateLabel = r.status === 'COMPLETED' ? 'Completado' : (r.status === 'PENDING' ? 'En Progreso' : 'Fallido');
+        let disabled = r.status !== 'COMPLETED' ? 'disabled' : '';
+        
+        tr.innerHTML = `
+          <td style="font-family: monospace; color:#94a3b8;">${r.id}</td>
+          <td style="font-weight:600; color:#fff;">${r.tipo}</td>
+          <td>${r.fecha}</td>
+          <td><span class="status-badge status-${r.status}">${stateLabel}</span></td>
+          <td>
+            <button class="action-btn" ${disabled} onclick="alert('Descargando PDF para ${r.id}...')">Descargar PDF</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    loadReports();
+  </script>
+</body>
+</html>

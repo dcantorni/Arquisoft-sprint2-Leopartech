@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BITE.co — Gestión de Usuarios</title>
+  <script src="config.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Outfit', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    header {
+      background: rgba(30, 41, 59, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 50;
+    }
+    header .logo { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.5px; color: #fff; }
+    header .logo span { background: linear-gradient(90deg, #4cc9f0, #4361ee); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    header .user-info { display: flex; align-items: center; gap: 20px; font-size: 0.9rem; }
+    header .user-info span { opacity: 0.9; font-weight: 600; }
+    header nav { display: flex; align-items: center; gap: 24px; font-size: 0.95rem; }
+    header nav a { color: rgba(255,255,255,0.7); text-decoration: none; font-weight: 600; transition: color 0.2s; }
+    header nav a:hover { color: #4cc9f0; }
+    header nav a.active { color: #fff; border-bottom: 2px solid #4cc9f0; padding-bottom: 4px; }
+    button.logout { background: rgba(239, 35, 60, 0.1); border: 1px solid rgba(239, 35, 60, 0.3); color: #ff4d6d; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; font-weight: 600; font-family: inherit; transition: all 0.2s; }
+    button.logout:hover { background: rgba(239, 35, 60, 0.2); }
+
+    .page-title { padding: 32px 32px 0; max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: flex-end; }
+    .page-title h1 { font-size: 2rem; font-weight: 800; margin-bottom: 8px; color: #fff; }
+    .page-title p { color: #94a3b8; font-size: 0.95rem; }
+    
+    .btn-primary { background: linear-gradient(90deg, #4361ee, #4cc9f0); color: #fff; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; font-family: inherit; cursor: pointer; box-shadow: 0 4px 15px rgba(67, 97, 238, 0.3); transition: transform 0.2s, box-shadow 0.2s; display: flex; align-items: center; gap: 8px; }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(67, 97, 238, 0.5); }
+
+    main { padding: 24px 32px 40px; max-width: 1200px; margin: 0 auto; }
+
+    .panel { background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.2); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th { background: rgba(0,0,0,0.2); text-align: left; padding: 16px 24px; font-weight: 600; color: #94a3b8; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 16px 24px; border-top: 1px solid rgba(255,255,255,0.05); color: #cbd5e1; }
+    tr:hover td { background: rgba(255,255,255,0.03); }
+    
+    .role-badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 800; border: 1px solid transparent; }
+    .role-ADMIN { background: rgba(247, 37, 133, 0.15); color: #f72585; border-color: rgba(247, 37, 133, 0.3); }
+    .role-MANAGER { background: rgba(67, 97, 238, 0.15); color: #4cc9f0; border-color: rgba(67, 97, 238, 0.3); }
+    .role-ANALYST { background: rgba(6, 214, 160, 0.15); color: #06d6a0; border-color: rgba(6, 214, 160, 0.3); }
+
+    .action-btn { background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-family: inherit; transition: all 0.2s; }
+    .action-btn:hover { background: rgba(255,255,255,0.1); }
+
+    /* Access denied */
+    .access-denied { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; padding: 40px; background: rgba(30, 41, 59, 0.6); border-radius: 16px; margin: 40px auto; max-width: 600px; border: 1px solid rgba(255,255,255,0.05); }
+    .access-denied .icon { font-size: 4rem; margin-bottom: 20px; text-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+    .access-denied h2 { font-size: 1.8rem; margin-bottom: 12px; color: #fff; }
+    .access-denied p { color: #94a3b8; margin-bottom: 32px; font-size: 1.05rem; }
+    .access-denied a { display: inline-block; padding: 12px 28px; background: linear-gradient(90deg, #4361ee, #4cc9f0); color: #fff; border-radius: 8px; text-decoration: none; font-weight: 600; transition: transform 0.2s; }
+    .access-denied a:hover { transform: translateY(-2px); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">BITE<span>.co</span></div>
+    <nav>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="metrics.html">Métricas</a>
+      <a href="reports.html">Reportes</a>
+      <a href="users.html" class="active">Usuarios</a>
+    </nav>
+    <div class="user-info">
+      <span id="headerEmail">Cargando…</span>
+      <button class="logout" onclick="logout()">Cerrar sesión</button>
+    </div>
+  </header>
+
+  <div id="accessDenied" style="display:none">
+    <div class="access-denied">
+      <div class="icon">🔒</div>
+      <h2>Acceso restringido</h2>
+      <p>Este módulo de gestión está disponible únicamente para administradores.</p>
+      <a href="dashboard.html">Volver al Dashboard</a>
+    </div>
+  </div>
+
+  <div id="usersContent" style="display:none">
+    <div class="page-title">
+      <div>
+        <h1>Gestión de Usuarios</h1>
+        <p>Control de acceso, roles y permisos de la plataforma BITE.co.</p>
+      </div>
+      <button class="btn-primary" onclick="alert('Funcionalidad de crear usuario en desarrollo.')">+ Nuevo Usuario</button>
+    </div>
+
+    <main>
+      <div class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>Correo Electrónico</th>
+              <th>Nombre de Empresa</th>
+              <th>Rol Asignado</th>
+              <th>Estado</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="usersTbody">
+            <!-- Mock data to be replaced by API eventually -->
+          </tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const token = localStorage.getItem('access_token');
+    const email = localStorage.getItem('user_email') || '';
+    const rol   = localStorage.getItem('user_rol') || 'ANALYST';
+
+    if (!token) {
+      window.location.href = 'index.html';
+    }
+
+    document.getElementById('headerEmail').textContent = email;
+
+    function logout() {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('user_email');
+      localStorage.removeItem('user_rol');
+      window.location.href = 'index.html';
+    }
+
+    if (rol !== 'ADMIN') {
+      document.getElementById('accessDenied').style.display = 'block';
+      // Esconder nav completo o sólo partes
+    } else {
+      document.getElementById('usersContent').style.display = 'block';
+      loadUsers();
+    }
+
+    async function loadUsers() {
+      const tbody = document.getElementById('usersTbody');
+      // Mock data for user management display
+      const users = [
+        { email: 'empresa_a@bite.co', nombre: 'BITE.co', rol: 'ADMIN', status: 'Activo' },
+        { email: 'manager@bite.co', nombre: 'Cliente B', rol: 'MANAGER', status: 'Activo' },
+        { email: 'analyst@bite.co', nombre: 'Cliente C', rol: 'ANALYST', status: 'Activo' },
+        { email: 'external_auditor@test.com', nombre: 'Auditor Externo', rol: 'ANALYST', status: 'Inactivo' }
+      ];
+
+      users.forEach(u => {
+        const tr = document.createElement('tr');
+        const activeColor = u.status === 'Activo' ? '#06d6a0' : '#64748b';
+        tr.innerHTML = `
+          <td style="font-weight:600; color:#fff;">${u.email}</td>
+          <td>${u.nombre}</td>
+          <td><span class="role-badge role-${u.rol}">${u.rol}</span></td>
+          <td><span style="color:${activeColor}; font-weight:600; font-size:0.85rem;">● ${u.status}</span></td>
+          <td>
+            <button class="action-btn" onclick="alert('Editar: ${u.email}')">Editar</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+  </script>
+</body>
+</html>
