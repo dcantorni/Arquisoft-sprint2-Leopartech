@@ -650,8 +650,6 @@ resource "aws_instance" "manejador_cloud" {
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
-    sudo apt-get install -y postgresql-client
-
     ${local.git_bootstrap}
 
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
@@ -809,8 +807,6 @@ resource "aws_instance" "manejador_autenticacion" {
     export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
-
-    sudo apt-get install -y postgresql-client
 
     ${local.git_bootstrap}
 
@@ -1213,8 +1209,6 @@ resource "aws_launch_template" "usuarios" {
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
-    sudo apt-get install -y postgresql-client
-
     ${local.git_bootstrap}
 
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
@@ -1392,8 +1386,6 @@ resource "aws_launch_template" "reportes" {
     export ALLOWED_HOSTS=${local.django_allowed_hosts}
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
-
-    sudo apt-get install -y postgresql-client
 
     ${local.git_bootstrap}
 
