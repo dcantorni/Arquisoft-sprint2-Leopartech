@@ -204,16 +204,71 @@ def cognito_validate(token):
             algorithms=['RS256'],
             audience=settings.COGNITO_CLIENT_ID,
         )
+        empresa_id = payload.get('custom:empresa_id')
+        rol = payload.get('custom:rol', 'ANALYST')
+        email = payload.get('email', '')
+
+        # Cognito id_token may omit custom claims; resolve tenant from local seed table.
+        if not empresa_id and email:
+            empresa_id, rol = _lookup_tenant_by_email(email, rol)
+
+        # #region agent log
+        _debug_auth_log('H5', 'backends.py:cognito_validate', 'tenant resolution', {
+            'email': email,
+            'has_custom_claim': bool(payload.get('custom:empresa_id')),
+            'empresa_id_resolved': bool(empresa_id),
+        })
+        # #endregion
+
         return {
             'user_id': payload.get('sub'),
-            'email': payload.get('email', ''),
-            'empresa_id': payload.get('custom:empresa_id'),
-            'rol': payload.get('custom:rol', 'ANALYST'),
+            'email': email,
+            'empresa_id': empresa_id,
+            'rol': rol,
             'valid': True,
         }
     except Exception as e:
         logger.warning("Cognito token validation failed: %s", e)
         return None
+
+
+def _lookup_tenant_by_email(email: str, default_rol: str = 'ANALYST'):
+    """Fallback when Cognito custom attributes are missing from the id_token."""
+    from .models import UsuarioLocal
+    try:
+        user = UsuarioLocal.objects.get(email__iexact=email.strip(), activo=True)
+        return str(user.empresa_id), user.rol or default_rol
+    except UsuarioLocal.DoesNotExist:
+        return None, default_rol
+
+
+# #region agent log
+def _debug_auth_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    import json
+    import os
+    import time
+    entry = {
+        'sessionId': 'c85b96',
+        'hypothesisId': hypothesis_id,
+        'location': location,
+        'message': message,
+        'data': data,
+        'timestamp': int(time.time() * 1000),
+    }
+    line = json.dumps(entry, default=str) + '\n'
+    for path in (
+        os.environ.get('DEBUG_LOG_PATH', ''),
+        '/tmp/debug-c85b96.log',
+    ):
+        if not path:
+            continue
+        try:
+            with open(path, 'a', encoding='utf-8') as fh:
+                fh.write(line)
+            break
+        except OSError:
+            continue
+# #endregion
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

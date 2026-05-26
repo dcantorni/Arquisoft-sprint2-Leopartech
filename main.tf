@@ -1578,6 +1578,19 @@ resource "aws_cognito_user_pool_client" "bite_spa" {
     "ALLOW_REFRESH_TOKEN_AUTH",
     "ALLOW_USER_SRP_AUTH",
   ]
+
+  read_attributes = [
+    "email",
+    "email_verified",
+    "custom:empresa_id",
+    "custom:rol",
+  ]
+
+  write_attributes = [
+    "email",
+    "custom:empresa_id",
+    "custom:rol",
+  ]
 }
 
 # -----------------------------------------------------------------------------
@@ -1659,6 +1672,35 @@ resource "null_resource" "confirm_empresa_b" {
         --password "BiteCo2024!" \
         --permanent \
         --region ${var.region}
+    EOT
+  }
+}
+
+# Re-sync custom attributes so id_token includes custom:empresa_id after client read_attributes change.
+resource "null_resource" "sync_cognito_user_attrs" {
+  depends_on = [
+    null_resource.confirm_empresa_a,
+    null_resource.confirm_empresa_b,
+    aws_cognito_user_pool_client.bite_spa,
+  ]
+
+  triggers = {
+    pool_id   = aws_cognito_user_pool.bite.id
+    client_id = aws_cognito_user_pool_client.bite_spa.id
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      aws cognito-idp admin-update-user-attributes \
+        --user-pool-id ${aws_cognito_user_pool.bite.id} \
+        --username empresa_a@bite.co \
+        --user-attributes Name=custom:empresa_id,Value=550e8400-e29b-41d4-a716-446655440001 Name=custom:rol,Value=admin \
+        --region ${var.region} || true
+      aws cognito-idp admin-update-user-attributes \
+        --user-pool-id ${aws_cognito_user_pool.bite.id} \
+        --username empresa_b@bite.co \
+        --user-attributes Name=custom:empresa_id,Value=550e8400-e29b-41d4-a716-446655440002 Name=custom:rol,Value=admin \
+        --region ${var.region} || true
     EOT
   }
 }
