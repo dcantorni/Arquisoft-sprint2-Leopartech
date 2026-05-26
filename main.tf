@@ -934,6 +934,7 @@ resource "aws_lb" "main" {
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = tolist(data.aws_subnets.default.ids)
+  idle_timeout       = 60
 
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-alb" })
 }
@@ -1371,8 +1372,8 @@ resource "aws_launch_template" "reportes" {
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
-    GUNICORN_WORKERS=2
-    GUNICORN_THREADS=2
+    GUNICORN_WORKERS=4
+    GUNICORN_THREADS=4
     GUNICORN_TIMEOUT=30
     ENV
 
@@ -1414,8 +1415,8 @@ resource "aws_launch_template" "reportes" {
     python3 manage.py seed_reportes_data || true
     nohup gunicorn manejador_reportes.wsgi:application \
       --bind 0.0.0.0:8003 \
-      --workers 2 \
-      --threads 2 \
+      --workers 4 \
+      --threads 4 \
       --timeout 30 \
       --access-logfile - \
       --error-logfile - \

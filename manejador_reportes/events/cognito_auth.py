@@ -1,7 +1,8 @@
 """Cognito id_token validation for TenantAuthMiddleware (mirrors manejador_autenticacion)."""
 import logging
 import os
-from typing import Optional
+import time
+from typing import Optional, Tuple
 
 import jwt
 import requests
@@ -14,9 +15,26 @@ _EMAIL_TENANT_MAP = {
     'empresa_b@bite.co': '550e8400-e29b-41d4-a716-446655440002',
 }
 
+_JWKS_CACHE: dict[str, Tuple[float, dict]] = {}
+_JWKS_TTL_SECONDS = 3600
+
 
 def _empresa_id_from_email(email: str) -> Optional[str]:
     return _EMAIL_TENANT_MAP.get(email.strip().lower())
+
+
+def _get_jwks(pool_id: str, region: str) -> dict:
+    now = time.time()
+    cached = _JWKS_CACHE.get(pool_id)
+    if cached and now - cached[0] < _JWKS_TTL_SECONDS:
+        return cached[1]
+    jwks_url = (
+        f'https://cognito-idp.{region}.amazonaws.com'
+        f'/{pool_id}/.well-known/jwks.json'
+    )
+    jwks = requests.get(jwks_url, timeout=5).json()
+    _JWKS_CACHE[pool_id] = (now, jwks)
+    return jwks
 
 
 # #region agent log
@@ -59,11 +77,7 @@ def validate_cognito_id_token(token: str) -> Optional[str]:
         return None
 
     try:
-        jwks_url = (
-            f'https://cognito-idp.{region}.amazonaws.com'
-            f'/{pool_id}/.well-known/jwks.json'
-        )
-        jwks = requests.get(jwks_url, timeout=5).json()
+        jwks = _get_jwks(pool_id, region)
         header = jwt.get_unverified_header(token)
         kid = header.get('kid')
 

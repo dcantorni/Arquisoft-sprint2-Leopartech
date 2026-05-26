@@ -86,6 +86,22 @@ class TenantAuthMiddleware:
         return self.get_response(request)
 
     def _resolve_tenant(self, token):
+        resolve_start = time.perf_counter()
+
+        # Fast path: local Cognito JWT (no HTTP round-trip via ALB → auth service).
+        # Under JMeter load, calling auth/validate per request caused ~10s queue → ALB 504.
+        if os.environ.get('COGNITO_USER_POOL_ID'):
+            empresa_id = validate_cognito_id_token(token)
+            elapsed_ms = (time.perf_counter() - resolve_start) * 1000
+            # #region agent log
+            _debug_log('H1', 'middleware.py:_resolve_tenant', 'cognito fast path', {
+                'resolved': empresa_id is not None,
+                'elapsed_ms': round(elapsed_ms, 1),
+            })
+            # #endregion
+            if empresa_id:
+                return empresa_id
+
         auth_url = getattr(settings, 'AUTH_SERVICE_URL', '')
         if not auth_url:
             logger.warning("AUTH_SERVICE_URL not configured — auth middleware is disabled")
@@ -93,16 +109,19 @@ class TenantAuthMiddleware:
 
         validate_url = f'{auth_url}/auth/validate'
         try:
+            auth_start = time.perf_counter()
             resp = requests.get(
                 validate_url,
                 headers={'Authorization': f'Bearer {token}'},
                 timeout=getattr(settings, 'AUTH_SERVICE_TIMEOUT', 2),
             )
+            auth_ms = (time.perf_counter() - auth_start) * 1000
             # #region agent log
-            _debug_log('H1', 'middleware.py:_resolve_tenant', 'auth service response', {
+            _debug_log('H2', 'middleware.py:_resolve_tenant', 'auth service response', {
                 'validate_url': validate_url,
                 'status_code': resp.status_code,
                 'has_empresa_id': bool(resp.status_code == 200 and resp.json().get('empresa_id')),
+                'auth_elapsed_ms': round(auth_ms, 1),
             })
             # #endregion
             if resp.status_code == 200:
@@ -110,27 +129,17 @@ class TenantAuthMiddleware:
                 if empresa_id:
                     return empresa_id
             logger.warning(
-                "Auth service returned %s — trying Cognito/local JWT fallback",
+                "Auth service returned %s — trying local JWT fallback",
                 resp.status_code,
             )
         except requests.RequestException as e:
             # #region agent log
-            _debug_log('H1', 'middleware.py:_resolve_tenant', 'auth service unreachable', {
+            _debug_log('H2', 'middleware.py:_resolve_tenant', 'auth service unreachable', {
                 'validate_url': validate_url,
                 'error': str(e),
             })
             # #endregion
-            logger.warning("Auth service unreachable: %s — trying Cognito/local JWT fallback", e)
-
-        empresa_id = validate_cognito_id_token(token)
-        # #region agent log
-        _debug_log('H4', 'middleware.py:_resolve_tenant', 'cognito fallback result', {
-            'resolved': empresa_id is not None,
-            'cognito_configured': bool(os.environ.get('COGNITO_USER_POOL_ID')),
-        })
-        # #endregion
-        if empresa_id:
-            return empresa_id
+            logger.warning("Auth service unreachable: %s — trying local JWT fallback", e)
 
         return self._validate_locally(token)
 
