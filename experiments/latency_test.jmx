@@ -75,13 +75,16 @@
           <intProp name="HTTPSampler.response_timeout">10000</intProp>
         </HTTPSamplerProxy>
         <hashTree>
-          <!-- /auth/login returns {"access_token": "...", "refresh_token": "..."} -->
-          <JSONPathExtractor guiclass="JSONPathExtractorGui" testclass="JSONPathExtractor"
-                             testname="Extract JWT Token" enabled="true">
-            <stringProp name="JSONPathExtractor.referenceName">jwt_token</stringProp>
-            <stringProp name="JSONPathExtractor.jsonPathExprs">$.access_token</stringProp>
-            <stringProp name="JSONPathExtractor.defaultValues">TOKEN_NOT_FOUND</stringProp>
-          </JSONPathExtractor>
+          <!-- Extract access_token using built-in RegexExtractor (no plugin needed) -->
+          <RegexExtractor guiclass="RegExtractorGui" testclass="RegexExtractor"
+                          testname="Extract JWT Token" enabled="true">
+            <stringProp name="RegexExtractor.useHeaders">false</stringProp>
+            <stringProp name="RegexExtractor.refname">jwt_token</stringProp>
+            <stringProp name="RegexExtractor.regex">"access_token":"([^"]+)"</stringProp>
+            <stringProp name="RegexExtractor.template">$1$</stringProp>
+            <stringProp name="RegexExtractor.default">TOKEN_NOT_FOUND</stringProp>
+            <stringProp name="RegexExtractor.match_no">1</stringProp>
+          </RegexExtractor>
           <hashTree/>
         </hashTree>
       </hashTree>
