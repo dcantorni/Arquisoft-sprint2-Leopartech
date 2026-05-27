@@ -137,7 +137,7 @@ locals {
   # Usage: interpolate after setting env vars in each user_data block
   git_bootstrap = <<-SCRIPT
     sudo apt-get update -y
-    sudo apt-get install -y python3-pip git build-essential libpq-dev python3-dev postgresql-client netcat-openbsd
+    sudo apt-get install -y --fix-missing python3-pip git build-essential libpq-dev python3-dev postgresql-client netcat-openbsd
     if [ ! -d "${local.repo_dir}/.git" ]; then
       sudo git clone ${var.repository} ${local.repo_dir}
     fi
@@ -1410,8 +1410,6 @@ resource "aws_instance" "manejador_autenticacion" {
     export ALLOWED_HOSTS=*
     export DEBUG=False
     export SECRET_KEY=bite-terraform-secret-key
-
-    sudo apt-get install -y postgresql-client
 
     ${local.git_bootstrap}
 
