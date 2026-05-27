@@ -71,10 +71,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         key    = f"rl:{ip}:{method}:{path}"
 
         try:
-            pipe  = self.redis.pipeline()
-            pipe.incr(key)
-            pipe.expire(key, window)
-            count = pipe.execute()[0]          # first result is the INCR value
+            count = self.redis.incr(key)
+            # Set TTL only on the first request so the window is fixed and
+            # expires naturally — calling EXPIRE on every request would reset
+            # the timer and keep the key alive indefinitely under load.
+            if count == 1:
+                self.redis.expire(key, window)
         except Exception as exc:
             logger.warning("RateLimitMiddleware: Redis error — failing open: %s", exc)
             return await call_next(request)
