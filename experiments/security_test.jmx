@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+<jmeterTestPlan version="1.2" properties="4.0" jmeter="4.0 r1823414">
   <hashTree>
     <TestPlan guiclass="TestPlanGui" testclass="TestPlan"
               testname="BITE.co – ASR19 Security Experiment (Rate Limiting Trade-off)" enabled="true">
@@ -89,7 +89,7 @@
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
                           testname="POST /auth/login" enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
-          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
@@ -109,23 +109,26 @@
           <intProp name="HTTPSampler.response_timeout">10000</intProp>
         </HTTPSamplerProxy>
         <hashTree>
-          <!-- Extract access_token using built-in RegexExtractor (no plugin needed) -->
-          <RegexExtractor guiclass="RegExtractorGui" testclass="RegexExtractor"
-                          testname="Extract JWT Token" enabled="true">
-            <stringProp name="RegexExtractor.useHeaders">false</stringProp>
-            <stringProp name="RegexExtractor.refname">jwt_token</stringProp>
-            <stringProp name="RegexExtractor.regex">"access_token":"([^"]+)"</stringProp>
-            <stringProp name="RegexExtractor.template">$1$</stringProp>
-            <stringProp name="RegexExtractor.default">TOKEN_NOT_FOUND</stringProp>
-            <stringProp name="RegexExtractor.match_no">1</stringProp>
-          </RegexExtractor>
-          <hashTree/>
-          <!-- Promote jwt_token variable to a global property so all thread groups can read it -->
+          <!-- Extract and promote jwt_token variable to a global property using Groovy -->
           <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
-                               testname="Promote JWT to property" enabled="true">
+                               testname="Extract and Promote JWT" enabled="true">
             <stringProp name="scriptLanguage">groovy</stringProp>
-            <stringProp name="script">props.put("jwt_token", vars.get("jwt_token"))
-log.info("JWT promoted to property: " + vars.get("jwt_token")?.take(20) + "...")</stringProp>
+            <stringProp name="script">import groovy.json.JsonSlurper
+
+def response = prev.getResponseDataAsString()
+try {
+    def json = new JsonSlurper().parseText(response)
+    def token = json.access_token
+    if (token) {
+        props.put("jwt_token", token)
+        log.info("JWT extracted and promoted to property: " + token.take(20) + "...")
+    } else {
+        log.error("access_token not found in JSON response")
+    }
+} catch (Exception e) {
+    log.error("Failed to parse JSON response: " + e.getMessage())
+}
+</stringProp>
           </JSR223PostProcessor>
           <hashTree/>
         </hashTree>
@@ -173,7 +176,7 @@ log.info("JWT promoted to property: " + vars.get("jwt_token")?.take(20) + "...")
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
                           testname="POST /projects – Phase 1" enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
-          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
@@ -293,7 +296,7 @@ log.info("JWT promoted to property: " + vars.get("jwt_token")?.take(20) + "...")
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
                           testname="POST /projects – Phase 2" enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
-          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
