@@ -120,6 +120,14 @@
             <stringProp name="RegexExtractor.match_no">1</stringProp>
           </RegexExtractor>
           <hashTree/>
+          <!-- Promote jwt_token variable to a global property so all thread groups can read it -->
+          <JSR223Sampler guiclass="TestBeanGUI" testclass="JSR223Sampler"
+                         testname="Promote JWT to property" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="script">props.put("jwt_token", vars.get("jwt_token"))
+log.info("JWT promoted to property: " + vars.get("jwt_token")?.take(20) + "...")</stringProp>
+          </JSR223Sampler>
+          <hashTree/>
         </hashTree>
       </hashTree>
 
@@ -156,7 +164,7 @@
             </elementProp>
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Authorization</stringProp>
-              <stringProp name="Header.value">Bearer ${jwt_token}</stringProp>
+              <stringProp name="Header.value">Bearer ${__P(jwt_token,TOKEN_NOT_FOUND)}</stringProp>
             </elementProp>
           </collectionProp>
         </HeaderManager>
@@ -276,7 +284,7 @@
             </elementProp>
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Authorization</stringProp>
-              <stringProp name="Header.value">Bearer ${jwt_token}</stringProp>
+              <stringProp name="Header.value">Bearer ${__P(jwt_token,TOKEN_NOT_FOUND)}</stringProp>
             </elementProp>
           </collectionProp>
         </HeaderManager>
