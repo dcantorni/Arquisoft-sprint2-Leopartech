@@ -98,7 +98,7 @@
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">${ALB_HOST}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
           <stringProp name="HTTPSampler.port">80</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/auth/login</stringProp>
@@ -174,7 +174,7 @@
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">${ALB_HOST}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
           <stringProp name="HTTPSampler.port">80</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/projects</stringProp>
@@ -294,7 +294,7 @@
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">${ALB_HOST}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
           <stringProp name="HTTPSampler.port">80</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/projects</stringProp>
