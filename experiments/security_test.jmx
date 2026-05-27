@@ -175,14 +175,14 @@
             </collectionProp>
           </elementProp>
           <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
-          <stringProp name="HTTPSampler.port">80</stringProp>
-          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
           <stringProp name="HTTPSampler.path">/projects</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
-          <intProp name="HTTPSampler.connect_timeout">5000</intProp>
-          <intProp name="HTTPSampler.response_timeout">2000</intProp>
+          <intProp name="HTTPSampler.connect_timeout">10000</intProp>
+          <intProp name="HTTPSampler.response_timeout">10000</intProp>
         </HTTPSamplerProxy>
         <hashTree>
 
@@ -295,14 +295,14 @@
             </collectionProp>
           </elementProp>
           <stringProp name="HTTPSampler.domain">${__P(ALB_HOST,localhost)}</stringProp>
-          <stringProp name="HTTPSampler.port">80</stringProp>
-          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
           <stringProp name="HTTPSampler.path">/projects</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
-          <intProp name="HTTPSampler.connect_timeout">5000</intProp>
-          <intProp name="HTTPSampler.response_timeout">2000</intProp>
+          <intProp name="HTTPSampler.connect_timeout">10000</intProp>
+          <intProp name="HTTPSampler.response_timeout">10000</intProp>
         </HTTPSamplerProxy>
         <hashTree>
           <!-- NO response code assertion here — we expect mixed 201/429 -->
