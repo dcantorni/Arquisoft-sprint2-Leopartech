@@ -15,9 +15,11 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',      # 1st — CORS
+    'projects.rate_limiter.RateLimitMiddleware',  # 2nd — rate limiting
     'django.middleware.security.SecurityMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'projects.middleware.TenantAuthMiddleware',
+    'projects.middleware.TenantAuthMiddleware',   # last — auth
 ]
 
 ROOT_URLCONF = 'manejador_usuarios.urls'
@@ -74,6 +76,10 @@ RESOURCE_SERVICE_TIMEOUT = int(os.environ.get('RESOURCE_SERVICE_TIMEOUT', '2'))
 # Cache TTLs (seconds)
 CUENTA_CLOUD_CACHE_TTL = int(os.environ.get('CUENTA_CLOUD_CACHE_TTL', '300'))
 EMPRESA_CACHE_TTL = int(os.environ.get('EMPRESA_CACHE_TTL', '300'))
+
+RATE_LIMIT_ENABLED = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
+RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', '10'))
+RATE_LIMIT_WINDOW = int(os.environ.get('RATE_LIMIT_WINDOW', '60'))
 
 LOGGING = {
     'version': 1,

@@ -27,6 +27,7 @@ class TenantAuthMiddleware:
 
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         if not auth_header.startswith('Bearer '):
+            self._report_unauthorized(request, 'missing_bearer_token')
             return JsonResponse(
                 {'error': 'Token de autenticación requerido. Use: Authorization: Bearer <token>'},
                 status=403,
@@ -36,6 +37,7 @@ class TenantAuthMiddleware:
         tenant_id = self._resolve_tenant(token)
 
         if tenant_id is None:
+            self._report_unauthorized(request, 'invalid_or_expired_token')
             return JsonResponse(
                 {'error': 'Token inválido o expirado.'},
                 status=403,
@@ -43,6 +45,30 @@ class TenantAuthMiddleware:
 
         request.tenant_id = tenant_id
         return self.get_response(request)
+
+    def _report_unauthorized(self, request, tipo, empresa_id_token=None):
+        def _send():
+            try:
+                import requests as req
+                seguridad_url = os.environ.get('SEGURIDAD_URL', '')
+                if seguridad_url:
+                    req.post(
+                        f'{seguridad_url}/security/events',
+                        json={
+                            'tipo': tipo,
+                            'endpoint': request.path,
+                            'metodo': request.method,
+                            'ip_origen': request.META.get('REMOTE_ADDR', ''),
+                            'empresa_id_token': str(empresa_id_token) if empresa_id_token else None,
+                            'evidencia': {'path': request.path},
+                        },
+                        timeout=0.5
+                    )
+            except Exception:
+                pass
+        import threading
+        threading.Thread(target=_send, daemon=True).start()
+
 
     def _resolve_tenant(self, token):
         auth_url = getattr(settings, 'AUTH_SERVICE_URL', '')

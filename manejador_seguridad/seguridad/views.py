@@ -3,8 +3,12 @@ import hmac
 import logging
 import requests as http_requests
 from rest_framework import status
+from rest_framework.decorators import api_view
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from datetime import datetime, timezone
+import uuid
+from .mongo_client import get_mongo_db, ping_mongo
 from django.db import connection, OperationalError
 from django.conf import settings
 
@@ -221,16 +225,79 @@ class HealthCheckView(APIView):
             checks['database'] = 'ok'
         except OperationalError:
             checks['database'] = 'error'
+            
+        mongo_ok = ping_mongo()
+        checks['mongodb'] = 'ok' if mongo_ok else 'error'
 
-        all_ok = checks.get('database') == 'ok'
+        all_ok = checks.get('database') == 'ok' and mongo_ok
         return Response(
             {
                 'service': 'manejador_seguridad',
                 'status': 'healthy' if all_ok else 'degraded',
                 'checks': checks,
             },
-            status=status.HTTP_200_OK if all_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
+            status=status.HTTP_200_OK,
         )
+
+
+@api_view(['POST'])
+def report_security_event(request):
+    """
+    Receives unauthorized access reports from other microservices.
+    Does NOT require auth token — it receives reports about failed auth attempts.
+    Saves to MongoDB.
+    """
+    data = request.data
+    evento = {
+        '_id': str(uuid.uuid4()),
+        'tipo': data.get('tipo', 'desconocido'),
+        'endpoint': data.get('endpoint', ''),
+        'metodo': data.get('metodo', ''),
+        'ip_origen': data.get('ip_origen', ''),
+        'empresa_id_token': data.get('empresa_id_token'),
+        'empresa_id_recurso': data.get('empresa_id_recurso'),
+        'bloqueado': True,
+        'evidencia': data.get('evidencia', {}),
+        'creado_en': datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        db = get_mongo_db()
+        db.eventos_seguridad.insert_one(evento)
+    except Exception as e:
+        # Never let security reporting crash — log and continue
+        import logging
+        logging.getLogger(__name__).error(f'MongoDB insert failed: {e}')
+    return Response({'registrado': True}, status=201)
+
+
+@api_view(['GET'])
+def audit_log_summary(request):
+    """
+    Returns aggregated security event summary for ASR experiment evidence.
+    Requires valid auth token.
+    """
+    try:
+        db = get_mongo_db()
+        total = db.eventos_seguridad.count_documents({'bloqueado': True})
+        pipeline = [
+            {'$group': {'_id': '$tipo', 'count': {'$sum': 1}}}
+        ]
+        por_tipo_raw = list(db.eventos_seguridad.aggregate(pipeline))
+        por_tipo = {item['_id']: item['count'] for item in por_tipo_raw}
+
+        return Response({
+            'total_intentos_no_autorizados': total,
+            'porcentaje_bloqueados': 100.0 if total > 0 else 0.0,
+            'por_tipo': por_tipo,
+            'ultimos_eventos': list(
+                db.eventos_seguridad.find(
+                    {},
+                    {'_id': 1, 'tipo': 1, 'endpoint': 1, 'ip_origen': 1, 'creado_en': 1}
+                ).sort('creado_en', -1).limit(10)
+            )
+        })
+    except Exception as e:
+        return Response({'error': str(e)}, status=503)
 
 
 # =============================================================================

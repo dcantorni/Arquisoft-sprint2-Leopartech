@@ -52,6 +52,12 @@ variable "celery_worker_concurrency" {
   default     = 4
 }
 
+variable "key_name" {
+  description = "EC2 key pair name for SSH access to instances in the Auto Scaling Group"
+  type        = string
+  default     = ""
+}
+
 # Instance types - kept at the smallest viable size for AWS Academy budget
 variable "instance_type_app" {
   description = "EC2 type for Django app servers (manejador_usuarios, manejador_cloud, manejador_reportes)"
@@ -220,7 +226,15 @@ resource "aws_security_group" "app" {
   }
 
   ingress {
-    description = "manejador_cloud - internal VPC only (no ALB)"
+    description     = "manejador_cloud from ALB and VPC (ASG + internal callers)"
+    from_port       = 8002
+    to_port         = 8002
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
+    description = "manejador_cloud internal VPC callers"
     from_port   = 8002
     to_port     = 8002
     protocol    = "tcp"
@@ -463,6 +477,20 @@ resource "aws_db_instance" "main" {
   })
 }
 
+resource "aws_db_instance" "cloud_read_replica" {
+  identifier             = "bite2-cloud-read-replica"
+  replicate_source_db    = aws_db_instance.main.identifier
+  instance_class         = "db.t3.micro"
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+  vpc_security_group_ids = [aws_security_group.db.id]
+
+  tags = merge(local.common_tags, {
+    Name = "bite2-cloud-read-replica"
+    Role = "read-replica"
+  })
+}
+
 # -----------------------------------------------------------------------------
 # APPLICATION SERVERS
 # architecture.md §3.3 - Django services on Ubuntu 22.04
@@ -486,7 +514,7 @@ resource "aws_instance" "manejador_usuarios" {
     aws_db_instance.main,
     aws_instance.redis,
     aws_instance.rabbitmq,
-    aws_instance.manejador_cloud,
+    aws_autoscaling_group.cloud,
     aws_instance.manejador_autenticacion,
   ]
 
@@ -504,9 +532,13 @@ resource "aws_instance" "manejador_usuarios" {
     DATABASE_PASSWORD=Usuarios_2024!
     REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
+    RESOURCE_SERVICE_URL=http://${aws_lb.main.dns_name}/cloud-accounts
     AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     AUTH_SERVICE_TIMEOUT=10
+    RATE_LIMIT_ENABLED=true
+    RATE_LIMIT_REQUESTS=10
+    RATE_LIMIT_WINDOW=60
+    SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
     ALLOWED_HOSTS=*
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
@@ -520,14 +552,19 @@ resource "aws_instance" "manejador_usuarios" {
     export DATABASE_PASSWORD='Usuarios_2024!'
     export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export RESOURCE_SERVICE_URL=http://${aws_instance.manejador_cloud.private_ip}:8002
+    export RESOURCE_SERVICE_URL=http://${aws_lb.main.dns_name}/cloud-accounts
     export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     export AUTH_SERVICE_TIMEOUT=10
+    export RATE_LIMIT_ENABLED=true
+    export RATE_LIMIT_REQUESTS=10
+    export RATE_LIMIT_WINDOW=60
+    export SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
     export ALLOWED_HOSTS=*
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
-    sudo apt-get install -y postgresql-client
+    sudo apt-get update -y
+    sudo apt-get install -y postgresql-client --fix-missing
 
     ${local.git_bootstrap}
 
@@ -535,7 +572,6 @@ resource "aws_instance" "manejador_usuarios" {
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
     until nc -z ${aws_instance.redis.private_ip} 6379; do sleep 5; done
     until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
-    until nc -z ${aws_instance.manejador_cloud.private_ip} 8002; do sleep 5; done
     until nc -z ${aws_instance.manejador_autenticacion.private_ip} 8004; do sleep 5; done
 
     # Create per-service DB and user using master credentials
@@ -562,52 +598,70 @@ resource "aws_instance" "manejador_usuarios" {
   })
 }
 
-resource "aws_instance" "manejador_cloud" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type_app
-  subnet_id                   = element(tolist(data.aws_subnets.default.ids), 0)
-  associate_public_ip_address = true
-  vpc_security_group_ids      = [aws_security_group.app.id, aws_security_group.ssh.id]
+# -----------------------------------------------------------------------------
+# manejador_cloud — FastAPI + Auto Scaling Group (ASR16 latency support)
+# Replaces the fixed EC2 instance with a launch template + ASG so the cloud
+# service can scale horizontally behind the ALB for latency experiments.
+# CQRS: launch template passes both DATABASE_HOST (write) and
+#       DATABASE_READ_HOST (read replica) as env vars.
+# -----------------------------------------------------------------------------
 
+resource "aws_launch_template" "cloud" {
+  name_prefix   = "${var.project_prefix}-cloud-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type_app
+  key_name      = var.key_name
 
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp3"
-  }
-
-  depends_on = [
-    aws_db_instance.main,
-    aws_instance.redis,
+  vpc_security_group_ids = [
+    aws_security_group.app.id,
+    aws_security_group.ssh.id,
   ]
 
-  user_data = <<-EOT
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+    }
+  }
+
+  user_data = base64encode(<<-EOT
     #!/bin/bash
     set -euxo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
     sudo tee /etc/environment <<ENV
     DATABASE_HOST=${aws_db_instance.main.address}
+    DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
     DATABASE_PORT=5432
     DATABASE_NAME=cloud_db
     DATABASE_USER=cloud_user
     DATABASE_PASSWORD=Cloud_2024!
     REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/1
+    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
+    CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
     ALLOWED_HOSTS=*
     DEBUG=True
     SECRET_KEY=bite-terraform-secret-key
     ENV
 
     export DATABASE_HOST=${aws_db_instance.main.address}
+    export DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
     export DATABASE_PORT=5432
     export DATABASE_NAME=cloud_db
     export DATABASE_USER=cloud_user
     export DATABASE_PASSWORD='Cloud_2024!'
     export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/1
+    export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
+    export CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
     export ALLOWED_HOSTS=*
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
-    sudo apt-get install -y postgresql-client
+    sudo apt-get update -y
+    sudo apt-get install -y postgresql-client --fix-missing
 
     ${local.git_bootstrap}
 
@@ -624,18 +678,97 @@ resource "aws_instance" "manejador_cloud" {
       -c "GRANT ALL ON SCHEMA public TO cloud_user;" || true
 
     cd ${local.repo_dir}/manejador_cloud
-    sudo python3 -m pip install -r requirements.txt
-    python3 manage.py migrate --noinput || true
-    # Seed ProveedorCloud, CuentaCloud, RecursoCloud, MetricaConsumo
-    python3 manage.py seed_cloud_data || true
-    nohup python3 manage.py runserver 0.0.0.0:8002 > /var/log/manejador_cloud.log 2>&1 &
+    sudo python3 -m pip install -r requirements.txt -q
+    python3 setup_db.py || echo "setup_db failed, continuing"
+    python3 seed_cloud_data.py || echo "seed failed, continuing"
+    nohup uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4 \
+      > /var/log/manejador_cloud.log 2>&1 &
   EOT
+  )
 
-  tags = merge(local.common_tags, {
-    Name    = "${var.project_prefix}-manejador-cloud"
-    Role    = "app-server"
-    Service = "cloud"
-  })
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name    = "${var.project_prefix}-manejador-cloud"
+      Role    = "app-server"
+      Service = "cloud"
+    })
+  }
+}
+
+resource "aws_autoscaling_group" "cloud" {
+  name                = "${var.project_prefix}-asg-cloud"
+  min_size            = 1
+  max_size            = 4
+  desired_capacity    = 1
+  vpc_zone_identifier = tolist(data.aws_subnets.default.ids)
+  target_group_arns   = [aws_lb_target_group.cloud.arn]
+
+  launch_template {
+    id      = aws_launch_template.cloud.id
+    version = "$Latest"
+  }
+
+  depends_on = [
+    aws_db_instance.main,
+    aws_db_instance.cloud_read_replica,
+    aws_instance.redis,
+    aws_lb_target_group.cloud,
+  ]
+
+  tag {
+    key                 = "Project"
+    value               = local.project_name
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_policy" "cloud_scale_out" {
+  name                   = "${var.project_prefix}-cloud-scale-out"
+  autoscaling_group_name = aws_autoscaling_group.cloud.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 120
+}
+
+resource "aws_autoscaling_policy" "cloud_scale_in" {
+  name                   = "${var.project_prefix}-cloud-scale-in"
+  autoscaling_group_name = aws_autoscaling_group.cloud.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 300
+}
+
+resource "aws_cloudwatch_metric_alarm" "cloud_cpu_high" {
+  alarm_name          = "${var.project_prefix}-cloud-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 70
+  alarm_actions       = [aws_autoscaling_policy.cloud_scale_out.arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.cloud.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "cloud_cpu_low" {
+  alarm_name          = "${var.project_prefix}-cloud-cpu-low"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 5
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 30
+  alarm_actions       = [aws_autoscaling_policy.cloud_scale_in.arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.cloud.name
+  }
 }
 
 resource "aws_instance" "manejador_reportes" {
@@ -807,9 +940,9 @@ resource "aws_instance" "worker_pool" {
 # -----------------------------------------------------------------------------
 # APPLICATION LOAD BALANCER
 # architecture.md §3.2 - AWS Application Load Balancer
-# Routes ASR16 traffic → manejador_usuarios (port 8001)
-# Routes ASR17 traffic → manejador_reportes (port 8003)
-# manejador_cloud is internal only - not exposed via ALB
+# Routes ASR16 traffic → manejador_usuarios  (port 8001) via /projects/*
+# Routes ASR17 traffic → manejador_reportes  (port 8003) via /events/* /reports/*
+# Routes cloud CQRS   → manejador_cloud ASG  (port 8002) via /cloud-accounts/*
 # -----------------------------------------------------------------------------
 
 resource "aws_lb" "main" {
@@ -860,6 +993,25 @@ resource "aws_lb_target_group" "reportes" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-reportes" })
 }
 
+# Target group for manejador_cloud ASG — CQRS FastAPI (ASR16 support)
+resource "aws_lb_target_group" "cloud" {
+  name     = "${var.project_prefix}-tg-cloud"
+  port     = 8002
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-cloud" })
+}
+
 # Register app server instances with their target groups
 resource "aws_lb_target_group_attachment" "usuarios" {
   target_group_arn = aws_lb_target_group.usuarios.arn
@@ -894,8 +1046,8 @@ resource "aws_lb_listener" "http" {
 # ASR2 – Self-signed TLS certificate for AWS Academy (no real domain needed)
 # Generates a private key + self-signed cert directly on the ALB via ACM import
 resource "aws_acm_certificate" "asr2_selfsigned" {
-  private_key       = tls_private_key.asr2.private_key_pem
-  certificate_body  = tls_self_signed_cert.asr2.cert_pem
+  private_key      = tls_private_key.asr2.private_key_pem
+  certificate_body = tls_self_signed_cert.asr2.cert_pem
 
   tags = merge(local.common_tags, {
     Name = "${var.project_prefix}-asr2-selfsigned"
@@ -916,7 +1068,7 @@ resource "tls_self_signed_cert" "asr2" {
     organization = "BITE.co ASR2 Experiment"
   }
 
-  validity_period_hours = 720  # 30 days
+  validity_period_hours = 720 # 30 days
 
   allowed_uses = [
     "key_encipherment",
@@ -976,6 +1128,27 @@ resource "aws_lb_listener_rule" "reports" {
   condition {
     path_pattern {
       values = ["/reports", "/reports/*"]
+    }
+  }
+}
+
+# HTTP → HTTPS redirect for /cloud-accounts/* (ASR2 TLS enforcement)
+resource "aws_lb_listener_rule" "cloud" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 25
+
+  action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = ["/cloud-accounts", "/cloud-accounts/*"]
     }
   }
 }
@@ -1218,6 +1391,7 @@ resource "aws_instance" "manejador_seguridad" {
     DATABASE_NAME=seguridad_db
     DATABASE_USER=seguridad_user
     DATABASE_PASSWORD=Seguridad_2024!
+    MONGO_URI=mongodb://admin_mongo:Mongo_2024!@127.0.0.1:27017/seguridad_logs?authSource=admin
     AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     AUTH_SERVICE_TIMEOUT=2
     LOCAL_JWT_SECRET=bite-local-jwt-secret
@@ -1234,6 +1408,7 @@ resource "aws_instance" "manejador_seguridad" {
     export DATABASE_NAME=seguridad_db
     export DATABASE_USER=seguridad_user
     export DATABASE_PASSWORD='Seguridad_2024!'
+    export MONGO_URI=mongodb://admin_mongo:Mongo_2024!@127.0.0.1:27017/seguridad_logs?authSource=admin
     export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     export AUTH_SERVICE_TIMEOUT=2
     export LOCAL_JWT_SECRET=bite-local-jwt-secret
@@ -1515,6 +1690,23 @@ resource "aws_lb_listener_rule" "https_reports" {
   }
 }
 
+# HTTPS forward for /cloud-accounts/* → manejador_cloud ASG
+resource "aws_lb_listener_rule" "https_cloud" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 25
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.cloud.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/cloud-accounts", "/cloud-accounts/*"]
+    }
+  }
+}
+
 # -----------------------------------------------------------------------------
 # OUTPUTS - use these in JMeter HTTP Request samplers
 # -----------------------------------------------------------------------------
@@ -1534,9 +1726,14 @@ output "alb_reportes_url" {
   value       = "https://${aws_lb.main.dns_name}/events/batch"
 }
 
-output "manejador_cloud_public_ip" {
-  description = "manejador_cloud public IP - internal service, for SSH debugging only"
-  value       = aws_instance.manejador_cloud.public_ip
+output "cloud_asg_name" {
+  description = "manejador_cloud Auto Scaling Group name"
+  value       = aws_autoscaling_group.cloud.name
+}
+
+output "cloud_read_replica_endpoint" {
+  description = "RDS read replica endpoint — DATABASE_READ_HOST for manejador_cloud CQRS"
+  value       = aws_db_instance.cloud_read_replica.address
 }
 
 output "redis_private_ip" {
@@ -1614,4 +1811,60 @@ output "asr2_integrity_check_url" {
 output "asr2_integrity_log_url" {
   description = "ASR2 experiment: audit log for all TLS/integrity checks"
   value       = "https://${aws_lb.main.dns_name}/security/integrity-log"
+}
+
+resource "aws_wafv2_web_acl" "rate_limit" {
+  name  = "bite2-rate-limit"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  rule {
+    name     = "PostProjectsRateLimit"
+    priority = 1
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 300
+        aggregate_key_type = "IP"
+
+        scope_down_statement {
+          byte_match_statement {
+            field_to_match {
+              uri_path {}
+            }
+            positional_constraint = "STARTS_WITH"
+            search_string         = "/projects"
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "PostProjectsRateLimit"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "bite2-waf"
+    sampled_requests_enabled   = true
+  }
+}
+
+resource "aws_wafv2_web_acl_association" "main" {
+  resource_arn = aws_lb.main.arn
+  web_acl_arn  = aws_wafv2_web_acl.rate_limit.arn
 }
