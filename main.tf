@@ -496,34 +496,36 @@ resource "aws_db_instance" "cloud_read_replica" {
 # architecture.md §3.3 - Django services on Ubuntu 22.04
 # -----------------------------------------------------------------------------
 
-resource "aws_instance" "manejador_usuarios" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type_app
-  subnet_id                   = element(tolist(data.aws_subnets.default.ids), 0)
-  associate_public_ip_address = true
-  vpc_security_group_ids      = [aws_security_group.app.id, aws_security_group.ssh.id]
+# -----------------------------------------------------------------------------
+# manejador_usuarios — Django + Auto Scaling Group (ASR16 latency support)
+# ASG allows ALB to distribute POST /projects across multiple instances,
+# directly supporting the P95 ≤ 500ms latency target under 150 concurrent threads.
+# -----------------------------------------------------------------------------
 
+resource "aws_launch_template" "usuarios" {
+  name_prefix   = "${var.project_prefix}-usuarios-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type_app
+  key_name      = var.key_name
 
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp3"
-  }
-
-  # Depends on all infra - user_data waits with nc before starting the service
-  depends_on = [
-    aws_db_instance.main,
-    aws_instance.redis,
-    aws_instance.rabbitmq,
-    aws_autoscaling_group.cloud,
-    aws_instance.manejador_autenticacion,
+  vpc_security_group_ids = [
+    aws_security_group.app.id,
+    aws_security_group.ssh.id,
   ]
 
-  user_data = <<-EOT
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+    }
+  }
+
+  user_data = base64encode(<<-EOT
     #!/bin/bash
     set -euxo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
-    # Environment - mirrors docker-compose env vars exactly
     sudo tee /etc/environment <<ENV
     DATABASE_HOST=${aws_db_instance.main.address}
     DATABASE_PORT=5432
@@ -568,13 +570,11 @@ resource "aws_instance" "manejador_usuarios" {
 
     ${local.git_bootstrap}
 
-    # Wait for RDS and other dependencies
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
     until nc -z ${aws_instance.redis.private_ip} 6379; do sleep 5; done
     until nc -z ${aws_instance.rabbitmq.private_ip} 5672; do sleep 5; done
     until nc -z ${aws_instance.manejador_autenticacion.private_ip} 8004; do sleep 5; done
 
-    # Create per-service DB and user using master credentials
     PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
       -c "CREATE DATABASE usuarios_db;" || true
     PGPASSWORD='Bite_Master_2024!' psql -h ${aws_db_instance.main.address} -U bite_master -d bite_master \
@@ -585,17 +585,50 @@ resource "aws_instance" "manejador_usuarios" {
       -c "GRANT ALL ON SCHEMA public TO usuarios_user;" || true
 
     cd ${local.repo_dir}/manejador_usuarios
-    sudo python3 -m pip install -r requirements.txt
+    sudo python3 -m pip install -r requirements.txt -q
     python3 manage.py migrate --noinput || true
-    python3 manage.py seed_usuarios_data || true
+    python3 manage.py seed_usuarios_data || echo "seed failed, continuing"
     nohup python3 manage.py runserver 0.0.0.0:8001 > /var/log/manejador_usuarios.log 2>&1 &
   EOT
+  )
 
-  tags = merge(local.common_tags, {
-    Name    = "${var.project_prefix}-manejador-usuarios"
-    Role    = "app-server"
-    Service = "usuarios"
-  })
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name    = "${var.project_prefix}-manejador-usuarios"
+      Role    = "app-server"
+      Service = "usuarios"
+    })
+  }
+}
+
+resource "aws_autoscaling_group" "usuarios" {
+  name                = "${var.project_prefix}-asg-usuarios"
+  min_size            = 1
+  max_size            = 4
+  desired_capacity    = 1
+  vpc_zone_identifier = tolist(data.aws_subnets.default.ids)
+  target_group_arns   = [aws_lb_target_group.usuarios.arn]
+
+  launch_template {
+    id      = aws_launch_template.usuarios.id
+    version = "$Latest"
+  }
+
+  depends_on = [
+    aws_db_instance.main,
+    aws_instance.redis,
+    aws_instance.rabbitmq,
+    aws_autoscaling_group.cloud,
+    aws_instance.manejador_autenticacion,
+    aws_lb_target_group.usuarios,
+  ]
+
+  tag {
+    key                 = "Project"
+    value               = local.project_name
+    propagate_at_launch = true
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -771,26 +804,31 @@ resource "aws_cloudwatch_metric_alarm" "cloud_cpu_low" {
   }
 }
 
-resource "aws_instance" "manejador_reportes" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type_app
-  subnet_id                   = element(tolist(data.aws_subnets.default.ids), 0)
-  associate_public_ip_address = true
-  vpc_security_group_ids      = [aws_security_group.app.id, aws_security_group.ssh.id]
+# -----------------------------------------------------------------------------
+# manejador_reportes — Django + Auto Scaling Group (ASR17 scalability support)
+# ASG allows horizontal scaling of the event processor under high batch load.
+# -----------------------------------------------------------------------------
 
+resource "aws_launch_template" "reportes" {
+  name_prefix   = "${var.project_prefix}-reportes-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type_app
+  key_name      = var.key_name
 
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp3"
-  }
-
-  depends_on = [
-    aws_db_instance.main,
-    aws_instance.redis,
-    aws_instance.rabbitmq,
+  vpc_security_group_ids = [
+    aws_security_group.app.id,
+    aws_security_group.ssh.id,
   ]
 
-  user_data = <<-EOT
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+    }
+  }
+
+  user_data = base64encode(<<-EOT
     #!/bin/bash
     set -euxo pipefail
     export DEBIAN_FRONTEND=noninteractive
@@ -824,7 +862,8 @@ resource "aws_instance" "manejador_reportes" {
     export DEBUG=True
     export SECRET_KEY=bite-terraform-secret-key
 
-    sudo apt-get install -y postgresql-client
+    sudo apt-get update -y
+    sudo apt-get install -y postgresql-client --fix-missing
 
     ${local.git_bootstrap}
 
@@ -842,17 +881,48 @@ resource "aws_instance" "manejador_reportes" {
       -c "GRANT ALL ON SCHEMA public TO reportes_user;" || true
 
     cd ${local.repo_dir}/manejador_reportes
-    sudo python3 -m pip install -r requirements.txt
+    sudo python3 -m pip install -r requirements.txt -q
     python3 manage.py migrate --noinput || true
-    python3 manage.py seed_reportes_data || true
+    python3 manage.py seed_reportes_data || echo "seed failed, continuing"
     nohup python3 manage.py runserver 0.0.0.0:8003 > /var/log/manejador_reportes.log 2>&1 &
   EOT
+  )
 
-  tags = merge(local.common_tags, {
-    Name    = "${var.project_prefix}-manejador-reportes"
-    Role    = "app-server"
-    Service = "reportes"
-  })
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name    = "${var.project_prefix}-manejador-reportes"
+      Role    = "app-server"
+      Service = "reportes"
+    })
+  }
+}
+
+resource "aws_autoscaling_group" "reportes" {
+  name                = "${var.project_prefix}-asg-reportes"
+  min_size            = 1
+  max_size            = 4
+  desired_capacity    = 1
+  vpc_zone_identifier = tolist(data.aws_subnets.default.ids)
+  target_group_arns   = [aws_lb_target_group.reportes.arn]
+
+  launch_template {
+    id      = aws_launch_template.reportes.id
+    version = "$Latest"
+  }
+
+  depends_on = [
+    aws_db_instance.main,
+    aws_instance.redis,
+    aws_instance.rabbitmq,
+    aws_lb_target_group.reportes,
+  ]
+
+  tag {
+    key                 = "Project"
+    value               = local.project_name
+    propagate_at_launch = true
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -880,7 +950,7 @@ resource "aws_instance" "worker_pool" {
     aws_db_instance.main,
     aws_instance.redis,
     aws_instance.rabbitmq,
-    aws_instance.manejador_reportes,
+    aws_autoscaling_group.reportes,
   ]
 
   user_data = <<-EOT
@@ -1012,18 +1082,9 @@ resource "aws_lb_target_group" "cloud" {
   tags = merge(local.common_tags, { Name = "${var.project_prefix}-tg-cloud" })
 }
 
-# Register app server instances with their target groups
-resource "aws_lb_target_group_attachment" "usuarios" {
-  target_group_arn = aws_lb_target_group.usuarios.arn
-  target_id        = aws_instance.manejador_usuarios.id
-  port             = 8001
-}
-
-resource "aws_lb_target_group_attachment" "reportes" {
-  target_group_arn = aws_lb_target_group.reportes.arn
-  target_id        = aws_instance.manejador_reportes.id
-  port             = 8003
-}
+# manejador_usuarios and manejador_reportes register to their target groups
+# automatically via target_group_arns in their ASG resources.
+# manejador_autenticacion and manejador_seguridad are fixed EC2s — explicit attachment needed.
 
 # ALB Listener - HTTP on port 80
 # ASR2: redirects HTTP -> HTTPS to enforce 100% encrypted traffic
