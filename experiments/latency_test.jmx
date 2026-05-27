@@ -1,30 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
-    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="BITE.co – Latency Test (Experiment B)" enabled="true">
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="BITE.co – ASR16 Latency Experiment" enabled="true">
       <stringProp name="TestPlan.comments">
-        Experiment B – Latency (architecture.md §4.2)
-        Goal: POST /projects responds in P95 &lt;= 500 ms, Average &lt;= 400 ms, Error rate = 0%
-        Blue elements: proyecto_service + Redis + PostgreSQL
+        ASR16 – Latency: POST /projects must respond in P95 &lt;= 500 ms, Average &lt;= 350 ms, Error rate &lt;= 1%
+        Tactics: CQRS + Redis cache (CuentaCloud validation) + Database per Service
+
+        Run: jmeter -n -t experiments/latency_test.jmx -l results/asr16.jtl \
+                    -e -o results/asr16_report -JALB_HOST=&lt;ALB_DNS_without_http&gt;
       </stringProp>
       <boolProp name="TestPlan.functional_mode">false</boolProp>
       <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
       <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
-      <elementProp name="TestPlan.arguments" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+      <elementProp name="TestPlan.arguments" elementType="Arguments" guiclass="ArgumentsPanel"
+                   testclass="Arguments" testname="User Defined Variables" enabled="true">
         <collectionProp name="Arguments.arguments">
-          <elementProp name="HOST" elementType="Argument">
-            <stringProp name="Argument.name">HOST</stringProp>
+          <!-- Override at runtime: -JALB_HOST=bite2-alb-XXXXXXX.us-east-1.elb.amazonaws.com -->
+          <elementProp name="ALB_HOST" elementType="Argument">
+            <stringProp name="Argument.name">ALB_HOST</stringProp>
             <stringProp name="Argument.value">localhost</stringProp>
-            <stringProp name="Argument.metadata">=</stringProp>
-          </elementProp>
-          <elementProp name="PORT" elementType="Argument">
-            <stringProp name="Argument.name">PORT</stringProp>
-            <stringProp name="Argument.value">8001</stringProp>
-            <stringProp name="Argument.metadata">=</stringProp>
-          </elementProp>
-          <elementProp name="PROTOCOL" elementType="Argument">
-            <stringProp name="Argument.name">PROTOCOL</stringProp>
-            <stringProp name="Argument.value">http</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
         </collectionProp>
@@ -33,12 +27,13 @@
     <hashTree>
 
       <!-- ================================================================ -->
-      <!-- setUp Thread Group: Authenticate once and store JWT token       -->
-      <!-- Runs before main tests; stores token in ${jwt_token} variable   -->
+      <!-- setUp Thread Group: Authenticate once, store JWT in ${jwt_token} -->
       <!-- ================================================================ -->
-      <SetupThreadGroup guiclass="SetupThreadGroupGui" testclass="SetupThreadGroup" testname="setUp – Obtain JWT Token" enabled="true">
+      <SetupThreadGroup guiclass="SetupThreadGroupGui" testclass="SetupThreadGroup"
+                        testname="setUp – Obtain JWT Token" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">stoptest</stringProp>
-        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
+                     guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
           <boolProp name="LoopController.continue_forever">false</boolProp>
           <intProp name="LoopController.loops">1</intProp>
         </elementProp>
@@ -46,7 +41,8 @@
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
       </SetupThreadGroup>
       <hashTree>
-        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Content-Type JSON" enabled="true">
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+                       testname="Content-Type JSON" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -56,7 +52,8 @@
         </HeaderManager>
         <hashTree/>
 
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /auth/login" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+                          testname="POST /auth/login" enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
             <collectionProp name="Arguments.arguments">
@@ -67,18 +64,20 @@
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">${HOST}</stringProp>
-          <stringProp name="HTTPSampler.port">8004</stringProp>
-          <stringProp name="HTTPSampler.protocol">${PROTOCOL}</stringProp>
+          <stringProp name="HTTPSampler.domain">${ALB_HOST}</stringProp>
+          <stringProp name="HTTPSampler.port">80</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/auth/login</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
-          <intProp name="HTTPSampler.connect_timeout">5000</intProp>
-          <intProp name="HTTPSampler.response_timeout">5000</intProp>
+          <intProp name="HTTPSampler.connect_timeout">10000</intProp>
+          <intProp name="HTTPSampler.response_timeout">10000</intProp>
         </HTTPSamplerProxy>
         <hashTree>
-          <JSONPathExtractor guiclass="JSONPathExtractorGui" testclass="JSONPathExtractor" testname="Extract JWT Token" enabled="true">
+          <!-- /auth/login returns {"access_token": "...", "refresh_token": "..."} -->
+          <JSONPathExtractor guiclass="JSONPathExtractorGui" testclass="JSONPathExtractor"
+                             testname="Extract JWT Token" enabled="true">
             <stringProp name="JSONPathExtractor.referenceName">jwt_token</stringProp>
             <stringProp name="JSONPathExtractor.jsonPathExprs">$.access_token</stringProp>
             <stringProp name="JSONPathExtractor.defaultValues">TOKEN_NOT_FOUND</stringProp>
@@ -88,22 +87,26 @@
       </hashTree>
 
       <!-- ================================================================ -->
-      <!-- Thread Group 1: Normal Load – 10 users                          -->
+      <!-- Thread Group 1: Normal Load — 20 users × 10 loops = 200 requests -->
+      <!-- Tests steady-state latency under normal traffic                  -->
       <!-- ================================================================ -->
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Normal Load – 10 Users" enabled="true">
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
+                   testname="Normal Load – 20 Users" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
-        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
+                     guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
           <boolProp name="LoopController.continue_forever">false</boolProp>
-          <intProp name="LoopController.loops">20</intProp>
+          <intProp name="LoopController.loops">10</intProp>
         </elementProp>
-        <stringProp name="ThreadGroup.num_threads">10</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">10</stringProp>
+        <stringProp name="ThreadGroup.num_threads">20</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">15</stringProp>
         <boolProp name="ThreadGroup.scheduler">false</boolProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
       </ThreadGroup>
       <hashTree>
 
-        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Header Manager" enabled="true">
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+                       testname="HTTP Headers – Normal Load" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -121,23 +124,24 @@
         </HeaderManager>
         <hashTree/>
 
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /projects" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+                          testname="POST /projects" enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">${__FileToString(${__BeanShell(import org.apache.jmeter.services.FileServer; FileServer.getFileServer().getBaseDir();)}/data/projects_payload.json,,)}</stringProp>
+                <stringProp name="Argument.value">{"nombre":"Proyecto Optimización AWS - Q1 2025","descripcion":"Proyecto de reducción de costos cloud para el primer trimestre. Incluye análisis de instancias EC2 infrautilizadas, optimización de buckets S3 y revisión de bases de datos RDS.","empresa_id":"550e8400-e29b-41d4-a716-446655440001","cuentas_cloud":["550e8400-e29b-41d4-a716-446655440011","550e8400-e29b-41d4-a716-446655440012"],"presupuesto":{"monto_mensual":"8500.00","moneda":"USD","alerta_porcentaje":80}}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">${HOST}</stringProp>
-          <stringProp name="HTTPSampler.port">${PORT}</stringProp>
-          <stringProp name="HTTPSampler.protocol">${PROTOCOL}</stringProp>
+          <stringProp name="HTTPSampler.domain">${ALB_HOST}</stringProp>
+          <stringProp name="HTTPSampler.port">80</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/projects</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
           <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
           <intProp name="HTTPSampler.connect_timeout">5000</intProp>
@@ -145,8 +149,9 @@
         </HTTPSamplerProxy>
         <hashTree>
 
-          <!-- Assertion: HTTP 201 -->
-          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Assert HTTP 201" enabled="true">
+          <!-- Assert HTTP 201 Created -->
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion"
+                             testname="Assert HTTP 201" enabled="true">
             <collectionProp name="Assertion.test_strings">
               <stringProp name="49586">201</stringProp>
             </collectionProp>
@@ -157,14 +162,16 @@
           </ResponseAssertion>
           <hashTree/>
 
-          <!-- Assertion: Latency ≤ 500 ms (P95 target) -->
-          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Assert Duration ≤ 500ms" enabled="true">
+          <!-- Assert latency ≤ 500 ms (ASR16 P95 target) -->
+          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion"
+                             testname="Assert Duration ≤ 500ms" enabled="true">
             <longProp name="DurationAssertion.duration">500</longProp>
           </DurationAssertion>
           <hashTree/>
 
-          <!-- JSON Path assertion: id must exist in response -->
-          <JSONPathAssertion guiclass="JSONPathAssertionGui" testclass="JSONPathAssertion" testname="Assert Response has id" enabled="true">
+          <!-- Assert response contains 'id' field -->
+          <JSONPathAssertion guiclass="JSONPathAssertionGui" testclass="JSONPathAssertion"
+                             testname="Assert Response has id" enabled="true">
             <stringProp name="JSON_PATH">$.id</stringProp>
             <stringProp name="EXPECTED_VALUE"></stringProp>
             <boolProp name="JSONVALIDATION">false</boolProp>
@@ -176,37 +183,51 @@
 
         </hashTree>
 
-        <!-- CSV Result for normal load -->
-        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary Report – Normal Load" enabled="true">
+        <!-- View Results Tree for debugging (disable in large runs) -->
+        <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector"
+                         testname="View Results Tree – Normal Load" enabled="true">
+          <boolProp name="ResultCollector.error_logging">true</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><threadName>true</threadName>
+              <dataType>true</dataType><encoding>false</encoding>
+              <assertions>true</assertions><subresults>false</subresults>
+              <responseData>false</responseData><samplerData>false</samplerData>
+              <xml>false</xml><fieldNames>true</fieldNames>
+              <responseHeaders>false</responseHeaders><requestHeaders>false</requestHeaders>
+              <responseDataOnError>true</responseDataOnError>
+              <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+              <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+              <threadCounts>true</threadCounts><idleTime>true</idleTime>
+              <connectTime>true</connectTime>
+            </value>
+          </objProp>
+          <stringProp name="filename">results/latency_normal_view.jtl</stringProp>
+        </ResultCollector>
+        <hashTree/>
+
+        <!-- Summary Report -->
+        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector"
+                         testname="Summary Report – Normal Load" enabled="true">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
             <value class="SampleSaveConfiguration">
-              <time>true</time>
-              <latency>true</latency>
-              <timestamp>true</timestamp>
-              <success>true</success>
-              <label>true</label>
-              <code>true</code>
-              <message>true</message>
-              <threadName>true</threadName>
-              <dataType>true</dataType>
-              <encoding>false</encoding>
-              <assertions>true</assertions>
-              <subresults>false</subresults>
-              <responseData>false</responseData>
-              <samplerData>false</samplerData>
-              <xml>false</xml>
-              <fieldNames>true</fieldNames>
-              <responseHeaders>false</responseHeaders>
-              <requestHeaders>false</requestHeaders>
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><threadName>true</threadName>
+              <dataType>true</dataType><encoding>false</encoding>
+              <assertions>true</assertions><subresults>false</subresults>
+              <responseData>false</responseData><samplerData>false</samplerData>
+              <xml>false</xml><fieldNames>true</fieldNames>
+              <responseHeaders>false</responseHeaders><requestHeaders>false</requestHeaders>
               <responseDataOnError>false</responseDataOnError>
               <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
-              <bytes>true</bytes>
-              <sentBytes>true</sentBytes>
-              <url>true</url>
-              <threadCounts>true</threadCounts>
-              <idleTime>true</idleTime>
+              <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+              <threadCounts>true</threadCounts><idleTime>true</idleTime>
               <connectTime>true</connectTime>
             </value>
           </objProp>
@@ -217,22 +238,26 @@
       </hashTree>
 
       <!-- ================================================================ -->
-      <!-- Thread Group 2: Stress Load – 100 users                         -->
+      <!-- Thread Group 2: Stress Load — 150 users × 5 loops = 750 requests -->
+      <!-- Tests P95 latency under peak concurrent load                     -->
       <!-- ================================================================ -->
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Stress Load – 100 Users" enabled="true">
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
+                   testname="Stress Load – 150 Users" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
-        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
+                     guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
           <boolProp name="LoopController.continue_forever">false</boolProp>
-          <intProp name="LoopController.loops">10</intProp>
+          <intProp name="LoopController.loops">5</intProp>
         </elementProp>
-        <stringProp name="ThreadGroup.num_threads">100</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">10</stringProp>
+        <stringProp name="ThreadGroup.num_threads">150</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">15</stringProp>
         <boolProp name="ThreadGroup.scheduler">false</boolProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
       </ThreadGroup>
       <hashTree>
 
-        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Header Manager" enabled="true">
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+                       testname="HTTP Headers – Stress Load" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -250,30 +275,33 @@
         </HeaderManager>
         <hashTree/>
 
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /projects – Stress" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+                          testname="POST /projects – Stress" enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">${__FileToString(${__BeanShell(import org.apache.jmeter.services.FileServer; FileServer.getFileServer().getBaseDir();)}/data/projects_payload.json,,)}</stringProp>
+                <stringProp name="Argument.value">{"nombre":"Proyecto Optimización AWS - Q1 2025","descripcion":"Proyecto de reducción de costos cloud para el primer trimestre. Incluye análisis de instancias EC2 infrautilizadas, optimización de buckets S3 y revisión de bases de datos RDS.","empresa_id":"550e8400-e29b-41d4-a716-446655440001","cuentas_cloud":["550e8400-e29b-41d4-a716-446655440011","550e8400-e29b-41d4-a716-446655440012"],"presupuesto":{"monto_mensual":"8500.00","moneda":"USD","alerta_porcentaje":80}}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">${HOST}</stringProp>
-          <stringProp name="HTTPSampler.port">${PORT}</stringProp>
-          <stringProp name="HTTPSampler.protocol">${PROTOCOL}</stringProp>
+          <stringProp name="HTTPSampler.domain">${ALB_HOST}</stringProp>
+          <stringProp name="HTTPSampler.port">80</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/projects</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
           <intProp name="HTTPSampler.connect_timeout">5000</intProp>
           <intProp name="HTTPSampler.response_timeout">2000</intProp>
         </HTTPSamplerProxy>
         <hashTree>
 
-          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Assert HTTP 201" enabled="true">
+          <!-- Assert HTTP 201 Created -->
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion"
+                             testname="Assert HTTP 201" enabled="true">
             <collectionProp name="Assertion.test_strings">
               <stringProp name="49586">201</stringProp>
             </collectionProp>
@@ -284,43 +312,34 @@
           </ResponseAssertion>
           <hashTree/>
 
-          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Assert Duration ≤ 500ms" enabled="true">
+          <!-- Assert latency ≤ 500 ms -->
+          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion"
+                             testname="Assert Duration ≤ 500ms" enabled="true">
             <longProp name="DurationAssertion.duration">500</longProp>
           </DurationAssertion>
           <hashTree/>
 
         </hashTree>
 
-        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary Report – Stress Load" enabled="true">
+        <!-- Summary Report – Stress Load -->
+        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector"
+                         testname="Summary Report – Stress Load" enabled="true">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
             <value class="SampleSaveConfiguration">
-              <time>true</time>
-              <latency>true</latency>
-              <timestamp>true</timestamp>
-              <success>true</success>
-              <label>true</label>
-              <code>true</code>
-              <message>true</message>
-              <threadName>true</threadName>
-              <dataType>true</dataType>
-              <encoding>false</encoding>
-              <assertions>true</assertions>
-              <subresults>false</subresults>
-              <responseData>false</responseData>
-              <samplerData>false</samplerData>
-              <xml>false</xml>
-              <fieldNames>true</fieldNames>
-              <responseHeaders>false</responseHeaders>
-              <requestHeaders>false</requestHeaders>
+              <time>true</time><latency>true</latency><timestamp>true</timestamp>
+              <success>true</success><label>true</label><code>true</code>
+              <message>true</message><threadName>true</threadName>
+              <dataType>true</dataType><encoding>false</encoding>
+              <assertions>true</assertions><subresults>false</subresults>
+              <responseData>false</responseData><samplerData>false</samplerData>
+              <xml>false</xml><fieldNames>true</fieldNames>
+              <responseHeaders>false</responseHeaders><requestHeaders>false</requestHeaders>
               <responseDataOnError>false</responseDataOnError>
               <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
-              <bytes>true</bytes>
-              <sentBytes>true</sentBytes>
-              <url>true</url>
-              <threadCounts>true</threadCounts>
-              <idleTime>true</idleTime>
+              <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+              <threadCounts>true</threadCounts><idleTime>true</idleTime>
               <connectTime>true</connectTime>
             </value>
           </objProp>
@@ -331,42 +350,57 @@
       </hashTree>
 
       <!-- ================================================================ -->
-      <!-- Global Aggregate Report                                          -->
+      <!-- Global Aggregate Report — shows P50, P90, P95, P99              -->
+      <!-- This is the primary evidence for ASR16 P95 ≤ 500 ms             -->
       <!-- ================================================================ -->
-      <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector" testname="Aggregate Report" enabled="true">
+      <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector"
+                       testname="Aggregate Report" enabled="true">
         <boolProp name="ResultCollector.error_logging">false</boolProp>
         <objProp>
           <name>saveConfig</name>
           <value class="SampleSaveConfiguration">
-            <time>true</time>
-            <latency>true</latency>
-            <timestamp>true</timestamp>
-            <success>true</success>
-            <label>true</label>
-            <code>true</code>
-            <message>true</message>
-            <threadName>true</threadName>
-            <dataType>true</dataType>
-            <encoding>false</encoding>
-            <assertions>true</assertions>
-            <subresults>false</subresults>
-            <responseData>false</responseData>
-            <samplerData>false</samplerData>
-            <xml>false</xml>
-            <fieldNames>true</fieldNames>
-            <responseHeaders>false</responseHeaders>
-            <requestHeaders>false</requestHeaders>
+            <time>true</time><latency>true</latency><timestamp>true</timestamp>
+            <success>true</success><label>true</label><code>true</code>
+            <message>true</message><threadName>true</threadName>
+            <dataType>true</dataType><encoding>false</encoding>
+            <assertions>true</assertions><subresults>false</subresults>
+            <responseData>false</responseData><samplerData>false</samplerData>
+            <xml>false</xml><fieldNames>true</fieldNames>
+            <responseHeaders>false</responseHeaders><requestHeaders>false</requestHeaders>
             <responseDataOnError>false</responseDataOnError>
             <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
-            <bytes>true</bytes>
-            <sentBytes>true</sentBytes>
-            <url>true</url>
-            <threadCounts>true</threadCounts>
-            <idleTime>true</idleTime>
+            <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+            <threadCounts>true</threadCounts><idleTime>true</idleTime>
             <connectTime>true</connectTime>
           </value>
         </objProp>
         <stringProp name="filename">results/latency_aggregate.csv</stringProp>
+      </ResultCollector>
+      <hashTree/>
+
+      <!-- Global Summary Report -->
+      <ResultCollector guiclass="SummaryReport" testclass="ResultCollector"
+                       testname="Summary Report – All" enabled="true">
+        <boolProp name="ResultCollector.error_logging">false</boolProp>
+        <objProp>
+          <name>saveConfig</name>
+          <value class="SampleSaveConfiguration">
+            <time>true</time><latency>true</latency><timestamp>true</timestamp>
+            <success>true</success><label>true</label><code>true</code>
+            <message>true</message><threadName>true</threadName>
+            <dataType>true</dataType><encoding>false</encoding>
+            <assertions>true</assertions><subresults>false</subresults>
+            <responseData>false</responseData><samplerData>false</samplerData>
+            <xml>false</xml><fieldNames>true</fieldNames>
+            <responseHeaders>false</responseHeaders><requestHeaders>false</requestHeaders>
+            <responseDataOnError>false</responseDataOnError>
+            <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+            <bytes>true</bytes><sentBytes>true</sentBytes><url>true</url>
+            <threadCounts>true</threadCounts><idleTime>true</idleTime>
+            <connectTime>true</connectTime>
+          </value>
+        </objProp>
+        <stringProp name="filename">results/latency_summary_all.csv</stringProp>
       </ResultCollector>
       <hashTree/>
 

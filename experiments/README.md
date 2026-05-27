@@ -1,9 +1,146 @@
-# BITE.co – JMeter Experiments
+# BITE.co Experiments — Sprint 4
 
 ## Architecture Reference
 
-- **Experiment A (Scalability)** → architecture.md §4.1 — Green elements
-- **Experiment B (Latency)**    → architecture.md §4.2 — Blue elements
+- **ASR16 (Latency)**     → `latency_test.jmx` — POST /projects P95 ≤ 500 ms
+- **ASR19 (Security)**    → `security_test.jmx` — Rate limiting trade-off
+- **ASR17 (Scalability)** → `scalability_test.jmx` — Worker pool throughput
+- **ASR2/ASR3 (Security)**→ `asr2_integrity_burpsuite_guide.md` + `ASR3_tenant_isolation.postman_collection.json`
+
+---
+
+## Setup
+
+Get ALB DNS after `terraform apply`:
+
+```bash
+terraform output alb_dns_name
+# Example: bite2-alb-XXXXXXX.us-east-1.elb.amazonaws.com
+```
+
+> **Note:** All JMeter requests go through the ALB (port 80 → redirected to HTTPS 443).
+> JMeter 5.6+ follows POST redirects correctly. In non-GUI mode (`-n`), SSL verification
+> is disabled by default so the self-signed certificate is accepted automatically.
+
+---
+
+## ASR16 — Latency Experiment
+
+**What it tests:** `POST /projects` latency with:
+- CQRS (PostgreSQL write DB + read replica for validation reads)
+- Redis cache for `CuentaCloud` validation (avoids HTTP hop on cache hit)
+- Database per Service (usuarios_db isolated, no cross-service contention)
+- Non-blocking RabbitMQ publish (daemon thread — never delays HTTP 201)
+
+**Run:**
+
+```bash
+mkdir -p results
+jmeter -n \
+  -t experiments/latency_test.jmx \
+  -l results/asr16.jtl \
+  -e -o results/asr16_report \
+  -JALB_HOST=<ALB_DNS_without_http>
+```
+
+**Thread groups:**
+
+| Group | Users | Ramp | Loops | Total requests |
+|---|---|---|---|---|
+| Normal Load | 20 | 15 s | 10 | 200 |
+| Stress Load | 150 | 15 s | 5 | 750 |
+
+**Expected results:**
+
+| Metric | Target |
+|---|---|
+| P95 latency | ≤ 500 ms |
+| Average latency | ≤ 350 ms |
+| Error rate | ≤ 1% |
+
+**Evidence files generated:**
+
+| File | Purpose |
+|---|---|
+| `results/latency_aggregate.csv` | P50/P90/P95/P99 — primary ASR16 evidence |
+| `results/latency_normal_load.csv` | Normal load samples |
+| `results/latency_stress_load.csv` | Stress load samples |
+| `results/asr16_report/index.html` | HTML dashboard with charts |
+
+---
+
+## ASR19 — Security Experiment (Rate Limiting Trade-off)
+
+**What it tests:** Latency cost and protection effectiveness of two-layer rate limiting:
+- **Layer 1:** AWS WAF — blocks at 300 req/IP/min for `/projects`
+- **Layer 2:** `RateLimitMiddleware` Django — blocks at 10 req/IP/60 s for `POST /projects`
+
+### Phase 1 — Baseline (no rate limiting)
+
+**1. Disable rate limiting on the server:**
+
+```bash
+ssh -i labsuser.pem ubuntu@<usuarios_public_ip> \
+  "cd /opt/biteco/manejador_usuarios && \
+   kill \$(pgrep -f runserver) 2>/dev/null || true ; \
+   RATE_LIMIT_ENABLED=false nohup python3 manage.py runserver 0.0.0.0:8001 \
+   > /var/log/manejador_usuarios.log 2>&1 &"
+```
+
+**2. In `security_test.jmx`: ENABLE Thread Group 1, DISABLE Thread Group 2**
+
+**3. Run:**
+
+```bash
+jmeter -n \
+  -t experiments/security_test.jmx \
+  -l results/asr19_baseline.jtl \
+  -e -o results/asr19_baseline_report \
+  -JALB_HOST=<ALB_DNS_without_http>
+```
+
+### Phase 2 — With rate limiting
+
+**1. Enable rate limiting on the server:**
+
+```bash
+ssh -i labsuser.pem ubuntu@<usuarios_public_ip> \
+  "cd /opt/biteco/manejador_usuarios && \
+   kill \$(pgrep -f runserver) 2>/dev/null || true ; \
+   RATE_LIMIT_ENABLED=true nohup python3 manage.py runserver 0.0.0.0:8001 \
+   > /var/log/manejador_usuarios.log 2>&1 &"
+```
+
+**2. In `security_test.jmx`: DISABLE Thread Group 1, ENABLE Thread Group 2**
+
+**3. Run:**
+
+```bash
+jmeter -n \
+  -t experiments/security_test.jmx \
+  -l results/asr19_protected.jtl \
+  -e -o results/asr19_protected_report \
+  -JALB_HOST=<ALB_DNS_without_http>
+```
+
+**4. Count 201 vs 429 responses:**
+
+```bash
+grep -c ",201," results/asr19_phase2_codes.csv   # successful
+grep -c ",429," results/asr19_phase2_codes.csv   # rate limited
+```
+
+### What to compare
+
+| Metric | Phase 1 (no protection) | Phase 2 (protected) |
+|---|---|---|
+| P95 latency | ? ms | ? ms |
+| Average latency | ? ms | ? ms |
+| HTTP 201 rate | ~100% | ~X% |
+| HTTP 429 rate | 0% | ~Y% |
+| Error rate | ~0% | ~Z% |
+
+Document the trade-off: security overhead adds ~X ms to P95 but blocks Y% of abusive traffic.
 
 ---
 
@@ -12,7 +149,6 @@
 | Tool | Version | Purpose |
 |---|---|---|
 | Apache JMeter | ≥ 5.6 | Test runner |
-| Docker + Docker Compose | ≥ 24 | Service stack |
 | Java | ≥ 11 | Required by JMeter |
 
 ---
