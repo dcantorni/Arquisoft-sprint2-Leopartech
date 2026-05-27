@@ -173,7 +173,7 @@ El caché Redis (db=1) estuvo activo durante todo el experimento para el acceso 
 
 ## 3. Video de Demostración
 
-> *(Enlace al video de demostración del experimento — agregar URL aquí)*
+- **Demo del experimento ASR16:** https://youtu.be/D_Y2EreroIE
 
 ---
 

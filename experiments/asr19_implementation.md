@@ -159,7 +159,8 @@ Durante los 17 segundos de carga con 150 threads concurrentes:
 
 ## 3. Video de Demostración
 
-> *(Enlace al video de demostración del experimento — agregar URL aquí)*
+- **Demo del experimento ASR19:** https://youtu.be/s8Yn1drkLNE
+- **Demo complementaria ASR19:** https://youtu.be/D_Y2EreroIE
 
 ---
 
