@@ -87,12 +87,12 @@
           </RegexExtractor>
           <hashTree/>
           <!-- Promote jwt_token variable to a global property so all thread groups can read it -->
-          <JSR223Sampler guiclass="TestBeanGUI" testclass="JSR223Sampler"
-                         testname="Promote JWT to property" enabled="true">
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
+                               testname="Promote JWT to property" enabled="true">
             <stringProp name="scriptLanguage">groovy</stringProp>
             <stringProp name="script">props.put("jwt_token", vars.get("jwt_token"))
 log.info("JWT promoted to property: " + vars.get("jwt_token")?.take(20) + "...")</stringProp>
-          </JSR223Sampler>
+          </JSR223PostProcessor>
           <hashTree/>
         </hashTree>
       </hashTree>
