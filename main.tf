@@ -671,6 +671,8 @@ resource "aws_launch_template" "cloud" {
     DATABASE_PASSWORD=Cloud_2024!
     REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/1
     AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    AUTH_DISABLED=true
+    AUTH_DISABLED_TENANT=550e8400-e29b-41d4-a716-446655440001
     SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
     CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
     ALLOWED_HOSTS=*
@@ -686,6 +688,8 @@ resource "aws_launch_template" "cloud" {
     export DATABASE_PASSWORD='Cloud_2024!'
     export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/1
     export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+    export AUTH_DISABLED=true
+    export AUTH_DISABLED_TENANT=550e8400-e29b-41d4-a716-446655440001
     export SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
     export CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
     export ALLOWED_HOSTS=*

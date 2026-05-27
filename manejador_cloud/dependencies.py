@@ -1,4 +1,5 @@
 import logging
+import os
 import requests
 import jwt
 from fastapi import Request, HTTPException, status, Depends
@@ -7,7 +8,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 def get_current_tenant(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """
@@ -15,6 +16,14 @@ def get_current_tenant(credentials: HTTPAuthorizationCredentials = Depends(secur
     Validates token via auth service or locally on fallback.
     Returns the tenant UUID string.
     """
+    # AUTH_DISABLED=true bypasses all token validation (load testing / dev mode)
+    if os.getenv("AUTH_DISABLED", "false").lower() == "true":
+        logger.warning("AUTH_DISABLED=true — skipping token validation")
+        return os.getenv("AUTH_DISABLED_TENANT", "550e8400-e29b-41d4-a716-446655440001")
+
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token requerido.")
+
     token = credentials.credentials
     auth_url = settings.AUTH_SERVICE_URL
     if not auth_url:
