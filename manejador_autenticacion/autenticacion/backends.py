@@ -176,41 +176,47 @@ def cognito_refresh(refresh_token_str):
 
 
 def cognito_validate(token):
-    import requests as http_requests
+    """
+    Validate a Cognito access token using the GetUser API.
+
+    Why GetUser instead of local JWT decode:
+    - Cognito access tokens use 'client_id' not 'aud', so jwt.decode(audience=...)
+      raises InvalidAudienceError for access tokens.
+    - Custom attributes (custom:empresa_id) are NOT included in access tokens,
+      only in ID tokens. GetUser returns all user attributes.
+    - GetUser rejects expired/revoked tokens server-side — no local key management.
+    """
+    import boto3
+    from botocore.exceptions import ClientError
 
     try:
-        jwks_url = (
-            f'https://cognito-idp.{settings.COGNITO_REGION}.amazonaws.com'
-            f'/{settings.COGNITO_USER_POOL_ID}/.well-known/jwks.json'
-        )
-        jwks = http_requests.get(jwks_url, timeout=5).json()
-        header = jwt.get_unverified_header(token)
-        kid = header.get('kid')
+        client = boto3.client('cognito-idp', region_name=settings.COGNITO_REGION)
+        user_info = client.get_user(AccessToken=token)
 
-        from jwt.algorithms import RSAAlgorithm
-        pub_key = None
-        for jwk in jwks.get('keys', []):
-            if jwk.get('kid') == kid:
-                pub_key = RSAAlgorithm.from_jwk(jwk)
-                break
+        attrs = {a['Name']: a['Value'] for a in user_info.get('UserAttributes', [])}
+        email = attrs.get('email', '')
+        empresa_id = attrs.get('custom:empresa_id')
 
-        if not pub_key:
-            logger.warning("No matching Cognito JWK found for kid=%s", kid)
-            return None
+        # custom:empresa_id may not be set on the Cognito user — fall back to local DB
+        if not empresa_id:
+            try:
+                from autenticacion.models import Usuario
+                user = Usuario.objects.filter(email=email).first()
+                if user and user.empresa_id:
+                    empresa_id = str(user.empresa_id)
+            except Exception as db_err:
+                logger.warning("DB fallback for empresa_id failed: %s", db_err)
 
-        payload = jwt.decode(
-            token,
-            pub_key,
-            algorithms=['RS256'],
-            audience=settings.COGNITO_CLIENT_ID,
-        )
         return {
-            'user_id': payload.get('sub'),
-            'email': payload.get('email', ''),
-            'empresa_id': payload.get('custom:empresa_id'),
-            'rol': payload.get('custom:rol', 'ANALYST'),
+            'user_id': user_info.get('Username'),
+            'email': email,
+            'empresa_id': empresa_id,
+            'rol': attrs.get('custom:rol', 'ANALYST'),
             'valid': True,
         }
+    except ClientError as e:
+        logger.warning("Cognito GetUser failed: %s", e.response['Error']['Message'])
+        return None
     except Exception as e:
         logger.warning("Cognito token validation failed: %s", e)
         return None
