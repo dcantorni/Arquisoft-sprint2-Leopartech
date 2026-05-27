@@ -1428,7 +1428,29 @@ resource "aws_instance" "manejador_autenticacion" {
     sudo python3 -m pip install -r requirements.txt
     python3 manage.py migrate --noinput || true
     python3 manage.py seed_auth_users || true
-    nohup python3 manage.py runserver 0.0.0.0:8004 > /var/log/manejador_autenticacion.log 2>&1 &
+
+    sudo tee /etc/systemd/system/manejador-autenticacion.service <<SERVICE
+[Unit]
+Description=BITE.co manejador_autenticacion
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=${local.repo_dir}/manejador_autenticacion
+EnvironmentFile=/etc/environment
+ExecStart=/usr/bin/python3 manage.py runserver 0.0.0.0:8004
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/manejador_autenticacion.log
+StandardError=append:/var/log/manejador_autenticacion.log
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable manejador-autenticacion
+    sudo systemctl start manejador-autenticacion
   EOT
 
   tags = merge(local.common_tags, {
@@ -1503,10 +1525,52 @@ resource "aws_instance" "manejador_seguridad" {
     until nc -z ${aws_db_instance.main.address} 5432; do sleep 5; done
     until nc -z ${aws_instance.manejador_autenticacion.private_ip} 8004; do sleep 5; done
 
+    # ── Install MongoDB 7.0 ──────────────────────────────────────────────────
+    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
+      | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+    echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" \
+      | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+    sudo apt-get update -y
+    sudo apt-get install -y mongodb-org
+    sudo systemctl enable mongod
+    sudo systemctl start mongod
+    # Wait until mongod is accepting connections
+    until mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null; do sleep 3; done
+    # Create admin user (idempotent — fails silently if already exists)
+    mongosh admin --eval "
+      try {
+        db.createUser({ user: 'admin_mongo', pwd: 'Mongo_2024!', roles: [{ role: 'root', db: 'admin' }] });
+      } catch(e) { print('user may already exist: ' + e); }
+    " || true
+
+    # ── Install app & create systemd service ────────────────────────────────
     cd ${local.repo_dir}/manejador_seguridad
     sudo python3 -m pip install -r requirements.txt
     python3 manage.py migrate --noinput || true
-    nohup python3 manage.py runserver 0.0.0.0:8005 > /var/log/manejador_seguridad.log 2>&1 &
+
+    sudo tee /etc/systemd/system/manejador-seguridad.service <<SERVICE
+[Unit]
+Description=BITE.co manejador_seguridad
+After=network.target mongod.service
+Requires=mongod.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=${local.repo_dir}/manejador_seguridad
+EnvironmentFile=/etc/environment
+ExecStart=/usr/bin/python3 manage.py runserver 0.0.0.0:8005
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/manejador_seguridad.log
+StandardError=append:/var/log/manejador_seguridad.log
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable manejador-seguridad
+    sudo systemctl start manejador-seguridad
   EOT
 
   tags = merge(local.common_tags, {

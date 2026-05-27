@@ -3,8 +3,8 @@
   "descripcion": "Proyecto de reducción de costos cloud para el primer trimestre. Incluye análisis de instancias EC2 infrautilizadas, optimización de buckets S3 y revisión de bases de datos RDS.",
   "empresa_id": "550e8400-e29b-41d4-a716-446655440001",
   "cuentas_cloud": [
-    "550e8400-e29b-41d4-a716-446655440011",
-    "550e8400-e29b-41d4-a716-446655440012"
+    "e65e7706-c1d6-4db7-8aa8-8ab7e4857654",
+    "4e6d8086-fe5c-4d85-b507-17a00b01112c"
   ],
   "presupuesto": {
     "monto_mensual": "8500.00",

@@ -48,7 +48,27 @@ def seed_data():
         else:
             logger.info(f"Proyecto already seeded: {existing_proyectos} records")
 
-        # 4. CuentaCloud (Seed 100 accounts)
+        # 4. CuentaCloud — fixed test UUIDs required by JMeter payload
+        test_cuentas = [
+            uuid.UUID('550e8400-e29b-41d4-a716-446655440011'),
+            uuid.UUID('550e8400-e29b-41d4-a716-446655440012'),
+        ]
+        for tc_id in test_cuentas:
+            exists = db.query(CuentaCloud).filter(CuentaCloud.id == tc_id).first()
+            if not exists:
+                db.add(CuentaCloud(
+                    id=tc_id,
+                    nombre=f"Cuenta-JMeter-{str(tc_id)[-4:]}",
+                    proveedor_id=proveedor_aws.id,
+                    proyecto_id=uuid.UUID('550e8400-e29b-41d4-a716-446655440099'),
+                    account_external_id=f"aws-jmeter-{str(tc_id)[-4:]}",
+                    region="us-east-1",
+                    activa=True,
+                ))
+                logger.info("Created fixed test CuentaCloud %s", tc_id)
+        db.commit()
+
+        # 4b. CuentaCloud (Seed 100 accounts)
         existing_cuentas = db.query(func.count(CuentaCloud.id)).scalar()
         if existing_cuentas < 100:
             logger.info(f"Seeding {100 - existing_cuentas} CuentaCloud records...")
