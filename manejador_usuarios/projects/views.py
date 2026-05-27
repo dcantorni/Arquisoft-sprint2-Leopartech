@@ -4,60 +4,33 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.db import connection, OperationalError
 
-from .models import Proyecto
-from .serializers import ProyectoCreateSerializer, ProyectoResponseSerializer
-from .services import ProyectoService
-from .resource_client import CloudServiceUnavailable
-
 logger = logging.getLogger(__name__)
+
+_MOVED_DETAIL = (
+    "El recurso /projects ha sido movido permanentemente a manejador_cloud. "
+    "Use el ALB endpoint: POST /projects (puerto 443)."
+)
 
 
 class ProyectoCreateView(APIView):
     """
-    GET  /projects — list projects for the authenticated tenant.
-    POST /projects — create a new project (requires valid JWT).
-    Target latency: ≤ 100 ms (architecture.md §6 Performance SLA).
+    /projects has moved to manejador_cloud (FastAPI, port 8002).
+    This stub returns HTTP 410 Gone so any misconfigured client or
+    direct-to-EC2 call fails loudly rather than silently timing out.
+    All ALB traffic for /projects/* now routes to the cloud target group.
     """
 
     def get(self, request):
-        empresa_id = getattr(request, 'tenant_id', None)
-        if not empresa_id:
-            return Response({'error': 'Tenant no identificado.'}, status=status.HTTP_403_FORBIDDEN)
-
-        qs = (
-            Proyecto.objects
-            .filter(empresa__id=empresa_id)
-            .select_related('empresa', 'presupuesto')
-            .prefetch_related('cuentas_cloud')
-            .order_by('-creado_en')[:50]
+        return Response(
+            {'error': _MOVED_DETAIL, 'code': 'ENDPOINT_MOVED'},
+            status=status.HTTP_410_GONE,
         )
-        serializer = ProyectoResponseSerializer(qs, many=True)
-        return Response(serializer.data)
 
     def post(self, request):
-        serializer = ProyectoCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            proyecto = ProyectoService.crear_proyecto(serializer.validated_data)
-        except ValueError as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-        except CloudServiceUnavailable as exc:
-            logger.error("Resource Service unavailable: %s", exc)
-            return Response(
-                {'error': 'Servicio de recursos cloud no disponible. Intente más tarde.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        except Exception:
-            logger.exception("Unexpected error creating proyecto")
-            return Response(
-                {'error': 'Error interno del servidor.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        response_data = ProyectoResponseSerializer(proyecto).data
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        return Response(
+            {'error': _MOVED_DETAIL, 'code': 'ENDPOINT_MOVED'},
+            status=status.HTTP_410_GONE,
+        )
 
 
 class HealthCheckView(APIView):

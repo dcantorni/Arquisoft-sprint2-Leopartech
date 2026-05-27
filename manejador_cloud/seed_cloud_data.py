@@ -4,7 +4,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import SessionLocalWrite
-from models import ProveedorCloud, CuentaCloud, RecursoCloud, MetricaConsumo
+from models import ProveedorCloud, CuentaCloud, RecursoCloud, MetricaConsumo, Proyecto
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,7 +24,31 @@ def seed_data():
             db.commit()
             logger.info("Created ProveedorCloud AWS")
         
-        # 2. CuentaCloud (Seed 100 accounts)
+        # 2. Proyecto (Seed 5,000 projects for ASR16 load tests)
+        existing_proyectos = db.query(func.count(Proyecto.id)).scalar()
+        if existing_proyectos < 5000:
+            logger.info(f"Seeding {5000 - existing_proyectos} Proyecto records...")
+            # Fixed empresa_id so JMeter payloads reference a known tenant
+            empresa_demo = uuid.UUID('550e8400-e29b-41d4-a716-446655440001')
+            proyectos_to_create = []
+            for i in range(existing_proyectos, 5000):
+                proyectos_to_create.append(Proyecto(
+                    id=uuid.uuid4(),
+                    nombre=f"Proyecto-Demo-{i+1}",
+                    descripcion=f"Proyecto de demostración #{i+1} para pruebas de carga",
+                    empresa_id=empresa_demo,
+                    presupuesto={"monto_mensual": str(1000 + i * 10), "moneda": "USD", "alerta_porcentaje": 80},
+                    activo=True,
+                ))
+            batch_size = 500
+            for i in range(0, len(proyectos_to_create), batch_size):
+                db.bulk_save_objects(proyectos_to_create[i:i+batch_size])
+                db.commit()
+            logger.info(f"Seeded {len(proyectos_to_create)} Proyecto records.")
+        else:
+            logger.info(f"Proyecto already seeded: {existing_proyectos} records")
+
+        # 4. CuentaCloud (Seed 100 accounts)
         existing_cuentas = db.query(func.count(CuentaCloud.id)).scalar()
         if existing_cuentas < 100:
             logger.info(f"Seeding {100 - existing_cuentas} CuentaCloud records...")
@@ -45,7 +69,7 @@ def seed_data():
         # Fetch accounts for resources
         cuentas = [c.id for c in db.query(CuentaCloud).limit(100).all()]
         
-        # 3. RecursoCloud (Seed 20,000 resources)
+        # 5. RecursoCloud (Seed 20,000 resources)
         existing_recursos = db.query(func.count(RecursoCloud.id)).scalar()
         if existing_recursos < 20000:
             tipos = ['EC2', 'S3', 'RDS', 'LAMBDA', 'EKS', 'VPC', 'OTRO']
@@ -69,7 +93,7 @@ def seed_data():
         else:
             logger.info(f"RecursoCloud already seeded: {existing_recursos} records")
         
-        # 4. MetricaConsumo
+        # 6. MetricaConsumo
         recursos = db.query(RecursoCloud).limit(5).all()
         hoy = date.today()
         inicio = date(hoy.year, hoy.month, 1)

@@ -83,5 +83,34 @@ class MetricaConsumoResponse(BaseModel):
     costo: float
     moneda: str
     registrada_en: datetime
-    
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
+# Proyecto schemas — POST /projects payload and response
+# ---------------------------------------------------------------------------
+
+class PresupuestoSchema(BaseModel):
+    monto_mensual: Optional[str] = None
+    moneda: Optional[str] = "USD"
+    alerta_porcentaje: Optional[int] = 80
+
+class ProyectoCreate(BaseModel):
+    nombre: str = Field(..., min_length=1, max_length=255)
+    descripcion: Optional[str] = Field(None, max_length=1000)
+    empresa_id: UUID
+    cuentas_cloud: List[UUID] = Field(..., min_length=1)
+    presupuesto: Optional[PresupuestoSchema] = None
+
+class ProyectoResponse(BaseModel):
+    id: UUID
+    nombre: str
+    descripcion: Optional[str] = None
+    empresa_id: UUID
+    presupuesto: Optional[Dict[str, Any]] = None
+    activo: bool
+    creado_en: datetime
+    cuentas_cloud: List[UUID] = Field(default_factory=list)
+
     model_config = ConfigDict(from_attributes=True)

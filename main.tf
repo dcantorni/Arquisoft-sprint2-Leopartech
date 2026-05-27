@@ -534,7 +534,6 @@ resource "aws_launch_template" "usuarios" {
     DATABASE_PASSWORD=Usuarios_2024!
     REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
     RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    RESOURCE_SERVICE_URL=http://${aws_lb.main.dns_name}/cloud-accounts
     AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     AUTH_SERVICE_TIMEOUT=10
     RATE_LIMIT_ENABLED=true
@@ -554,7 +553,6 @@ resource "aws_launch_template" "usuarios" {
     export DATABASE_PASSWORD='Usuarios_2024!'
     export REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/0
     export RABBITMQ_URL=amqp://bite:bite_pass@${aws_instance.rabbitmq.private_ip}:5672/bite_vhost
-    export RESOURCE_SERVICE_URL=http://${aws_lb.main.dns_name}/cloud-accounts
     export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     export AUTH_SERVICE_TIMEOUT=10
     export RATE_LIMIT_ENABLED=true
@@ -1010,7 +1008,7 @@ resource "aws_instance" "worker_pool" {
 # -----------------------------------------------------------------------------
 # APPLICATION LOAD BALANCER
 # architecture.md §3.2 - AWS Application Load Balancer
-# Routes ASR16 traffic → manejador_usuarios  (port 8001) via /projects/*
+# Routes ASR16 traffic → manejador_cloud ASG (port 8002) via /projects/*  (local DB, no HTTP hop)
 # Routes ASR17 traffic → manejador_reportes  (port 8003) via /events/* /reports/*
 # Routes cloud CQRS   → manejador_cloud ASG  (port 8002) via /cloud-accounts/*
 # -----------------------------------------------------------------------------
@@ -1210,6 +1208,27 @@ resource "aws_lb_listener_rule" "cloud" {
   condition {
     path_pattern {
       values = ["/cloud-accounts", "/cloud-accounts/*"]
+    }
+  }
+}
+
+# HTTP → HTTPS redirect for /projects/* (ASR2 TLS enforcement)
+resource "aws_lb_listener_rule" "projects_redirect" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 30
+
+  action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = ["/projects", "/projects/*"]
     }
   }
 }
@@ -1703,13 +1722,14 @@ resource "aws_lb_listener_rule" "https_security" {
   }
 }
 
-resource "aws_lb_listener_rule" "https_usuarios" {
+# /projects/* → manejador_cloud ASG (ASR16: local DB validation, no inter-service hop)
+resource "aws_lb_listener_rule" "https_projects" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 10
 
   action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.usuarios.arn
+    target_group_arn = aws_lb_target_group.cloud.arn
   }
 
   condition {

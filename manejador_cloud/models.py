@@ -82,3 +82,26 @@ class MetricaConsumo(Base):
         Index('metricas_periodo_idx', 'periodo_inicio', 'periodo_fin'),
         Index('idx_metrica_recurso', 'recurso_id'),
     )
+
+
+class Proyecto(Base):
+    """
+    Cloud project — owns one or more CuentaCloud records.
+    Moved here from manejador_usuarios so that POST /projects validation
+    (cloud-account lookup) is a local DB query instead of an inter-service
+    HTTP call, eliminating the network hop that penalised ASR16 latency.
+    """
+    __tablename__ = 'proyectos'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    nombre = Column(String(255), nullable=False)
+    descripcion = Column(String(1000), nullable=True)
+    empresa_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    presupuesto = Column(JSONB, default=dict)
+    activo = Column(Boolean, default=True, index=True)
+    creado_en = Column(DateTime(timezone=True), default=datetime.utcnow)
+    actualizado_en = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index('proyectos_empresa_activo_idx', 'empresa_id', 'activo'),
+    )

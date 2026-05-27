@@ -32,6 +32,13 @@ experiments/results/
 # Generated files (built by Terraform from templates)
 frontend/config.js
 
+# Terraform
+.terraform/
+.terraform.lock.hcl
+terraform.zip
+*.tfstate
+*.tfstate.backup
+
 # IDE
 .idea/
 .vscode/
