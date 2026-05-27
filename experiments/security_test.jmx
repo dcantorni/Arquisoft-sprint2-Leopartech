@@ -52,7 +52,7 @@
           <!-- Override at runtime: -JALB_HOST=bite2-alb-XXXXXXX.us-east-1.elb.amazonaws.com -->
           <elementProp name="ALB_HOST" elementType="Argument">
             <stringProp name="Argument.name">ALB_HOST</stringProp>
-            <stringProp name="Argument.value">localhost</stringProp>
+            <stringProp name="Argument.value">${__P(ALB_HOST,localhost)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
         </collectionProp>
