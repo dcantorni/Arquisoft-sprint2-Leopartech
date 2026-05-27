@@ -3,92 +3,118 @@
 
 ---
 
-## 1. Resultados Obtenidos
+## Contenido
 
-### 1.1 Evidencias
-
-#### Repositorio
-- **URL:** https://github.com/dcantorni/Arquisoft-sprint2-Leopartech
-- **Rama:** `main`
-- **Commit del experimento:** `44572ce` — *Fix rate limiter: set EXPIRE only on first request per window*
-
-#### Infraestructura AWS desplegada
-
-| Componente | Valor |
-|---|---|
-| Application Load Balancer | `bite2-alb-409016959.us-east-1.elb.amazonaws.com` |
-| manejador_cloud EC2 (IP pública) | `44.213.125.28` |
-| manejador_cloud ASG | `bite2-asg-cloud` (min 1 / max 4 instancias) |
-| Redis (privado) | `172.31.87.254:6379` |
-| PostgreSQL RDS | `bite2-postgres.ctbzntbwi40b.us-east-1.rds.amazonaws.com` |
-| Read Replica RDS | `bite2-cloud-read-replica.ctbzntbwi40b.us-east-1.rds.amazonaws.com` |
-| Target Group Cloud | `bite2-tg-cloud` (puerto 8002, health check `/health`) |
-
-#### Configuración del Rate Limiter
-
-El mecanismo de protección implementado es un **middleware Redis sliding-window** en `manejador_cloud/middleware/rate_limit.py`:
-
-```
-RATE_LIMIT_ENABLED  = true
-RATE_LIMIT_REQUESTS = 20        # máximo 20 solicitudes por ventana
-RATE_LIMIT_WINDOW   = 10        # ventana de 10 segundos por IP
-Endpoint protegido  = POST /projects
-Clave Redis         = rl:{client_ip}:POST:/projects
-Respuesta bloqueada = HTTP 429 + header Retry-After: 10
-```
-
-El middleware verifica el header `X-Forwarded-For` (inyectado por el ALB) para obtener la IP real del cliente.
-
-#### Verificación funcional previa al experimento
-
-Prueba de humo ejecutada directamente sobre el EC2 (`http://localhost:8002/projects`):
-
-```
-Request  1: 201   ← ventana nueva, solicitud permitida
-Request  2: 201
-...
-Request 20: 201   ← último request permitido en la ventana (límite = 20)
-Request 21: 429   ← tráfico bloqueado por rate limiter
-Request 22: 429
-...
-Request 25: 429
-```
-
-#### Configuración JMeter — Phase 2 (ataque con rate limiting habilitado)
-
-| Parámetro | Valor |
-|---|---|
-| Herramienta | Apache JMeter 5.6.3 |
-| Thread Group | Phase 2 – Attack 150 Users |
-| Threads (usuarios concurrentes) | 150 |
-| Ramp-up | 15 segundos |
-| Loops por thread | 5 |
-| Total solicitudes esperadas | 750 |
-| Endpoint | `POST /projects` vía HTTPS ALB |
-| Payload | Proyecto con `empresa_id` fijo + 2 `cuentas_cloud` seeded |
-| Timeout de conexión | 10 000 ms |
-| Timeout de respuesta | 10 000 ms |
+1. [Resultados obtenidos](#resultados-obtenidos)
+2. [Análisis de resultados](#análisis-de-resultados)
+3. [Video de demostración](#video-de-demostración)
+4. [Uso de IAG](#uso-de-iag)
 
 ---
 
-### 1.2 Datos Obtenidos
+## Resultados obtenidos
 
-#### Resultados globales (Phase 2 — con rate limiting habilitado)
+En esta sección se agregan tanto evidencias como los resultados (datos) del experimento.
 
-| Métrica | Valor |
+### Evidencias
+
+Algunas evidencias son:
+
+- Link del repositorio donde realizan el proyecto.
+- Capturas de pantalla de los despliegues en AWS.
+- Capturas de pantalla de cómo recopilan los datos. Por ejemplo, los resultados de JMeter.
+- Capturas de pantalla de las plataformas de terceros que necesiten para el desarrollo del experimento. Estas evidencias deben estar acompañadas de una explicación.
+
+### Datos obtenidos
+
+Los datos obtenidos del experimento pueden variar según el atributo de calidad que se esté probando.
+
+**Seguridad:**
+
+---
+
+**Link repo:** https://github.com/dcantorni/Arquisoft-sprint2-Leopartech
+
+---
+
+**Instancias AWS:**
+
+| Instancia | Tipo | IP Pública | Servicio |
+|---|---|---|---|
+| manejador_cloud (ASG) | EC2 – Auto Scaling Group `bite2-asg-cloud` | `44.213.125.28` | FastAPI + Rate Limiter |
+| manejador_autenticacion | EC2 | `44.203.147.86` | Auth Service |
+| manejador_seguridad | EC2 | `32.197.226.122` | Security Service |
+| Redis | EC2 privado | `172.31.87.254` | Rate limiting + Cache |
+| PostgreSQL RDS | RDS Multi-AZ | `bite2-postgres.ctbzntbwi40b.us-east-1.rds.amazonaws.com` | Base de datos principal |
+| Read Replica RDS | RDS réplica | `bite2-cloud-read-replica.ctbzntbwi40b.us-east-1.rds.amazonaws.com` | Lectura CQRS |
+
+---
+
+**Grupos de seguridad:**
+
+| Grupo | Reglas relevantes |
 |---|---|
-| Total de solicitudes | 751 |
-| Throughput | 42.9 req/s |
-| Duración total | ~17 segundos |
-| Solicitudes permitidas (HTTP 201) | **40** |
-| Solicitudes bloqueadas (HTTP 429) | **711** |
-| **Porcentaje bloqueado** | **94.67 %** |
-| Tiempo promedio general | 124 ms |
-| Tiempo mínimo | 74 ms |
-| Tiempo máximo | 695 ms |
-| P95 global (201 + 429) | 267 ms |
+| `app` | Entrada: puerto 8002 desde ALB y VPC |
+| `ssh` | Entrada: puerto 22 desde IP autorizada |
+| ALB | Entrada: 80 (HTTP) y 443 (HTTPS) desde 0.0.0.0/0 |
 
-#### Desglose por código de respuesta
+---
+
+**Load Balancer:**
+
+- **DNS:** `bite2-alb-409016959.us-east-1.elb.amazonaws.com`
+- **Target Group:** `bite2-tg-cloud` — puerto 8002, health check `GET /health` → HTTP 200
+- **Estado del target:** `healthy` durante todo el experimento
+- **Listener HTTPS (443):** Redirige `/projects/*` al ASG del manejador_cloud
+
+---
+
+**Configuración del Rate Limiter (RateLimitMiddleware):**
+
+```
+Archivo:             manejador_cloud/middleware/rate_limit.py
+Algoritmo:           Redis sliding-window counter (INCR + EXPIRE condicional)
+RATE_LIMIT_ENABLED:  true
+RATE_LIMIT_REQUESTS: 20 solicitudes por ventana
+RATE_LIMIT_WINDOW:   10 segundos por IP de cliente
+Endpoint protegido:  POST /projects
+IP del cliente:      X-Forwarded-For (inyectado por el ALB)
+Respuesta bloqueada: HTTP 429 + header Retry-After: 10
+```
+
+---
+
+**Pruebas de resultados — Phase 2 (150 usuarios, rate limiting habilitado)**
+==========
+
+Herramienta: Apache JMeter 5.6.3
+
+Configuración del Thread Group:
+
+| Parámetro | Valor |
+|---|---|
+| Usuarios concurrentes | 150 |
+| Ramp-up | 15 segundos |
+| Loops por thread | 5 |
+| Total solicitudes | 751 |
+| Endpoint | `POST https://bite2-alb-409016959.us-east-1.elb.amazonaws.com/projects` |
+
+Resultados del experimento:
+
+| Métrica | Valor | Target | Cumple |
+|---|---|---|---|
+| Total solicitudes | 751 | — | — |
+| Throughput | 42.9 req/s | — | — |
+| Duración | ~17 segundos | — | — |
+| **Solicitudes bloqueadas (HTTP 429)** | **711** | — | — |
+| **Solicitudes permitidas (HTTP 201)** | **40** | — | — |
+| **Porcentaje bloqueado** | **94.67 %** | ≥ 90 % | ✅ |
+| Tiempo promedio general | 124 ms | — | — |
+| Tiempo mínimo | 74 ms | — | — |
+| Tiempo máximo | 695 ms | — | — |
+| P95 global (201 + 429) | 267 ms | — | — |
+
+Desglose por código de respuesta:
 
 | Código | Significado | Count | % | Avg (ms) | P95 (ms) | Max (ms) |
 |---|---|---|---|---|---|---|
@@ -97,80 +123,77 @@ Request 25: 429
 
 ---
 
-## 2. Análisis de Resultados
+**Pruebas de resultados — Verificación funcional previa (smoke test)**
+==========
 
-### 2.1 Cumplimiento de los criterios del ASR19
+Prueba ejecutada directamente en el EC2 con 25 solicitudes secuenciales:
+
+```
+Request  1: 201  ← ventana nueva
+Request  2: 201
+...
+Request 20: 201  ← último permitido (límite = 20)
+Request 21: 429  ← rate limiter activo
+Request 22: 429
+...
+Request 25: 429
+```
+
+Confirma que el rate limiter se activa exactamente en el request número 21 y que la ventana de 10 segundos expira correctamente antes de un nuevo ciclo.
+
+---
+
+## Análisis de resultados
+
+### Cumplimiento de los criterios del ASR19
 
 | Criterio | Valor esperado | Valor obtenido | Cumple |
 |---|---|---|---|
 | P95 solicitudes legítimas (HTTP 201) | ≤ 500 ms | **340 ms** | ✅ |
 | Porcentaje de tráfico abusivo bloqueado | ≥ 90 % | **94.67 %** | ✅ |
-| Sistema sin caídas ni timeouts críticos | 0 errores de conexión | 0 errores de red | ✅ |
-| Solicitudes legítimas respondidas con HTTP 201 | 100 % de las no bloqueadas | 100 % | ✅ |
+| Sistema sin caídas ni timeouts críticos | 0 errores de red | 0 errores de red | ✅ |
+| Solicitudes legítimas con HTTP 201 | 100 % de no bloqueadas | 100 % | ✅ |
 
-### 2.2 Análisis arquitectónico
+### Impacto del rate limiting sobre la base de datos
 
-**Redis como mecanismo de rate limiting**
+Las 711 solicitudes bloqueadas retornan HTTP 429 directamente desde el middleware de Redis, antes de que cualquier lógica de negocio o consulta a PostgreSQL sea ejecutada. El 94.67 % del tráfico abusivo fue absorbido completamente por Redis sin tocar la base de datos, cumpliendo el objetivo de validación temprana del ASR19.
 
-El rate limiter utiliza Redis con el patrón INCR + EXPIRE. El TTL se fija únicamente en la primera solicitud de cada ventana (cuando el contador pasa de 0 a 1), garantizando que la ventana expire naturalmente en 10 segundos sin reiniciarse ante tráfico continuo. Esto resuelve el problema de la "ventana perpetua" donde `EXPIRE` se reiniciaba en cada request bajo alta concurrencia.
+### Latencia de solicitudes bloqueadas
 
-**Impacto sobre la base de datos**
+Las respuestas 429 tienen un promedio de **120 ms** y P95 de **265 ms**. Este tiempo corresponde principalmente al overhead TLS (ALB → instancia) y a la consulta atómica Redis INCR. Al no involucrar PostgreSQL ni lógica compleja, el rate limiter rechaza tráfico abusivo con mínima sobrecarga.
 
-Las 711 solicitudes bloqueadas retornan HTTP 429 directamente desde el middleware, antes de que cualquier lógica de negocio o consulta a PostgreSQL sea ejecutada. Esto significa que el 94.67 % del tráfico abusivo fue absorbido por Redis sin tocar la base de datos, cumpliendo el objetivo de validación temprana descrito en el ASR19.
+### Latencia de solicitudes legítimas
 
-**Latencia de solicitudes bloqueadas**
+Las 40 solicitudes que superaron el rate limit y llegaron al handler de FastAPI respondieron con promedio de **183 ms** y P95 de **340 ms** — bien por debajo del umbral de 500 ms del ASR19. Esto confirma que el mecanismo de protección no degrada la experiencia del usuario legítimo.
 
-Las respuestas 429 tienen un promedio de **120 ms** y un P95 de **265 ms**. Este tiempo corresponde principalmente al overhead de TLS (ALB → instancia) y a la consulta atómica a Redis. Al no involucrar PostgreSQL ni lógica de aplicación compleja, el rate limiter añade latencia mínima.
+### Estabilidad del sistema
 
-**Latencia de solicitudes legítimas**
+Durante los 17 segundos de carga con 150 threads concurrentes el ALB distribuyó correctamente las solicitudes, el target group mantuvo estado `healthy`, no se registraron errores 5xx ni timeouts de red, y el throughput se mantuvo estable en ~43 req/s.
 
-Las 40 solicitudes que superaron el check de rate limiting y llegaron al handler de FastAPI respondieron con un promedio de **183 ms** y P95 de **340 ms** — bien por debajo del umbral de 500 ms del ASR19.
+### Conclusiones
 
-**Separación CQRS protegida**
-
-Al bloquear el tráfico abusivo antes de la capa de datos, la réplica de lectura (CQRS read path) utilizada para validar `CuentaCloud` y el nodo de escritura principal mantuvieron carga estable durante el experimento. No se registraron errores de conexión a la base de datos.
-
-**Estabilidad del sistema**
-
-Durante los 17 segundos de carga con 150 threads concurrentes:
-- El ALB distribuyó correctamente las solicitudes al único nodo activo del ASG.
-- El target group mantuvo estado `healthy` (health checks respondiendo HTTP 200).
-- No se registraron timeouts de red ni errores de tipo 5xx.
-- El throughput se mantuvo estable en ~43 req/s.
-
-### 2.3 Comparativa esperada Phase 1 vs Phase 2
-
-| Métrica | Phase 1 (sin rate limit) | Phase 2 (con rate limit) | Δ |
-|---|---|---|---|
-| Solicitudes exitosas (201) | ~200 (100 %) | 40 (5.3 %) | -92 % |
-| Solicitudes bloqueadas (429) | 0 | 711 | +711 |
-| P95 | ~500 ms esperado | 267 ms (global) | Mejor |
-| Carga sobre PostgreSQL | Alta | Baja (bloqueada en Redis) | ↓ 94.67 % |
-
-### 2.4 Conclusiones
-
-1. La táctica de **rate limiting con Redis** demostró ser altamente efectiva: bloquea el 94.67 % del tráfico abusivo, superando el umbral mínimo del 90 % definido en el ASR19.
-2. La **validación temprana** en el middleware garantiza que las solicitudes bloqueadas nunca lleguen a PostgreSQL, protegiendo la integridad de la base de datos bajo ataques de abuso de recursos.
-3. Las **solicitudes legítimas** (aquellas dentro del límite de frecuencia) mantienen un P95 de 340 ms, cumpliendo el SLA de 500 ms del ASR19.
-4. La arquitectura **CQRS + Database per Service + Redis Cache** demostró resistencia ante tráfico concurrente abusivo sin degradación observable del servicio principal.
-5. El sistema mantuvo **estabilidad operativa completa** durante el experimento: sin caídas, sin errores 5xx y con health checks respondiendo normalmente durante toda la prueba.
+1. La táctica de **rate limiting con Redis** bloqueó el **94.67 %** del tráfico abusivo, superando el umbral del 90 % definido en el ASR19.
+2. La **validación temprana** en el middleware garantiza que las solicitudes bloqueadas nunca lleguen a PostgreSQL, protegiendo la base de datos de escrituras innecesarias.
+3. Las solicitudes legítimas mantienen un P95 de **340 ms**, cumpliendo el SLA de 500 ms.
+4. La arquitectura **CQRS + Database per Service + Redis Cache** demostró resistencia ante tráfico abusivo concurrente sin degradación del servicio principal.
+5. No se presentaron caídas de servicio, timeouts críticos ni errores 5xx durante el experimento.
 
 ---
 
-## 3. Video de Demostración
+## Video de demostración
 
-- **Demo del experimento ASR19:** https://youtu.be/s8Yn1drkLNE
-- **Demo complementaria ASR19:** https://youtu.be/D_Y2EreroIE
+- https://youtu.be/s8Yn1drkLNE
+- https://youtu.be/D_Y2EreroIE
 
 ---
 
-## 4. Uso de IAG
+## Uso de IAG
 
 Durante el desarrollo de este experimento se utilizaron herramientas de Inteligencia Artificial Generativa (IAG) para:
 
 - **Diseño e implementación del middleware `RateLimitMiddleware`**: la IAG apoyó la construcción del middleware Redis sliding-window en FastAPI, incluyendo la corrección de un bug crítico donde `EXPIRE` se reiniciaba en cada request (reemplazado por `EXPIRE` condicional solo cuando `count == 1`).
 - **Construcción y ajuste del script JMeter** (`security_test.jmx`): la IAG generó la estructura del plan de pruebas con las dos fases, los grupos de threads, los colectores de resultados y el script Groovy para extracción de JWT con fallback a `AUTH_DISABLED_BYPASS`.
-- **Diagnóstico de errores en tiempo real**: la IAG interpretó los logs de `cloud-init`, los errores de inicio de uvicorn y los resultados de JMeter para identificar causas raíz (bug EXPIRE, /etc/environment con espacios, nohup sin permisos de log, etc.).
+- **Diagnóstico de errores en tiempo real**: la IAG interpretó los logs de cloud-init, los errores de inicio de uvicorn y los resultados de JMeter para identificar causas raíz.
 - **Análisis de métricas**: la IAG calculó los percentiles P95 diferenciados por código de respuesta (201 vs 429) y generó las tablas comparativas del informe.
 
-La validación arquitectónica final, la selección de parámetros del rate limiter (20 req/10 s) y el análisis de los resultados frente a los criterios del ASR19 fueron realizados y verificados por el equipo de desarrollo.
+La validación arquitectónica final, la selección de parámetros del rate limiter y el análisis de los resultados frente a los criterios del ASR19 fueron realizados y verificados por el equipo de desarrollo.
