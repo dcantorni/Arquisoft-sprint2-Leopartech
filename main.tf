@@ -467,9 +467,10 @@ resource "aws_db_instance" "main" {
   password               = "Bite_Master_2024!"
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.db.id]
-  skip_final_snapshot    = true
-  publicly_accessible    = false
-  deletion_protection    = false
+  skip_final_snapshot      = true
+  publicly_accessible      = false
+  deletion_protection      = false
+  backup_retention_period  = 1   # required for read replica creation
 
   tags = merge(local.common_tags, {
     Name = "${var.project_prefix}-postgres"
