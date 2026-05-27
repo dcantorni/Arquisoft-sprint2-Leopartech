@@ -662,23 +662,26 @@ resource "aws_launch_template" "cloud" {
     set -euxo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
-    sudo tee /etc/environment <<ENV
-    DATABASE_HOST=${aws_db_instance.main.address}
-    DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
-    DATABASE_PORT=5432
-    DATABASE_NAME=cloud_db
-    DATABASE_USER=cloud_user
-    DATABASE_PASSWORD=Cloud_2024!
-    REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/1
-    AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
-    AUTH_DISABLED=true
-    AUTH_DISABLED_TENANT=550e8400-e29b-41d4-a716-446655440001
-    SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
-    CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
-    ALLOWED_HOSTS=*
-    DEBUG=True
-    SECRET_KEY=bite-terraform-secret-key
-    ENV
+    sudo bash -c 'cat > /etc/environment' <<ENVEOF
+DATABASE_HOST=${aws_db_instance.main.address}
+DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
+DATABASE_PORT=5432
+DATABASE_NAME=cloud_db
+DATABASE_USER=cloud_user
+DATABASE_PASSWORD=Cloud_2024!
+REDIS_URL=redis://${aws_instance.redis.private_ip}:6379/1
+AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
+AUTH_DISABLED=true
+AUTH_DISABLED_TENANT=550e8400-e29b-41d4-a716-446655440001
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REQUESTS=20
+RATE_LIMIT_WINDOW=10
+SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
+CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
+ALLOWED_HOSTS=*
+DEBUG=True
+SECRET_KEY=bite-terraform-secret-key
+ENVEOF
 
     export DATABASE_HOST=${aws_db_instance.main.address}
     export DATABASE_READ_HOST=${aws_db_instance.cloud_read_replica.address}
@@ -690,6 +693,9 @@ resource "aws_launch_template" "cloud" {
     export AUTH_SERVICE_URL=http://${aws_instance.manejador_autenticacion.private_ip}:8004
     export AUTH_DISABLED=true
     export AUTH_DISABLED_TENANT=550e8400-e29b-41d4-a716-446655440001
+    export RATE_LIMIT_ENABLED=true
+    export RATE_LIMIT_REQUESTS=20
+    export RATE_LIMIT_WINDOW=10
     export SEGURIDAD_URL=http://${aws_instance.manejador_seguridad.private_ip}:8005
     export CORS_ALLOWED_ORIGINS=http://${aws_lb.main.dns_name}
     export ALLOWED_HOSTS=*
@@ -717,6 +723,7 @@ resource "aws_launch_template" "cloud" {
     sudo python3 -m pip install -r requirements.txt -q
     python3 setup_db.py || echo "setup_db failed, continuing"
     python3 seed_cloud_data.py || echo "seed failed, continuing"
+    sudo touch /var/log/manejador_cloud.log && sudo chmod 666 /var/log/manejador_cloud.log
     nohup uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4 \
       > /var/log/manejador_cloud.log 2>&1 &
   EOT

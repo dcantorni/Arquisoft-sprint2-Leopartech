@@ -6,40 +6,54 @@
       <stringProp name="TestPlan.comments">
         ASR19 – Security Experiment: Rate Limiting Trade-off
 
-        Measures the latency cost of enabling RateLimitMiddleware + WAF on POST /projects.
+        Measures the effect of RateLimitMiddleware on POST /projects in manejador_cloud.
+        Rate limiter: Redis sliding window — 20 req / 10 s per client IP (configurable).
         Two phases, two thread groups — run one at a time.
 
         ================================================================
         HOW TO RUN:
 
-        Phase 1 – Baseline WITHOUT rate limiting:
-          SSH to manejador_usuarios EC2 and run:
-            export RATE_LIMIT_ENABLED=false
-            kill $(pgrep -f runserver) || true
-            cd /opt/biteco/manejador_usuarios
-            nohup python3 manage.py runserver 0.0.0.0:8001 \
-              > /var/log/manejador_usuarios.log 2&gt;&amp;1 &amp;
-          Then ENABLE Thread Group 1, DISABLE Thread Group 2 and run:
+        Phase 1 – Baseline WITHOUT rate limiting (ENABLE TG1, DISABLE TG2):
+          SSH to manejador_cloud EC2:
+            ssh -i &lt;key.pem&gt; ubuntu@&lt;cloud_ec2_ip&gt;
+            sudo pkill -f "uvicorn main:app" || true; sleep 1
+            cd /opt/biteco/manejador_cloud
+            AUTH_DISABLED=true RATE_LIMIT_ENABLED=false \
+              nohup uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4 \
+              &gt; /tmp/manejador_cloud.log 2&gt;&amp;1 &amp;
+            sleep 3 &amp;&amp; curl -s http://localhost:8002/health
+
+          Run from JMeter machine (ENABLE Thread Group 1, DISABLE Thread Group 2):
             jmeter -n -t experiments/security_test.jmx \
               -l results/asr19_baseline.jtl \
               -e -o results/asr19_baseline_report \
-              -JALB_HOST=&lt;ALB_DNS_without_http&gt;
+              -JALB_HOST=bite2-alb-409016959.us-east-1.elb.amazonaws.com
 
-        Phase 2 – WITH rate limiting:
-          SSH to manejador_usuarios EC2 and run:
-            export RATE_LIMIT_ENABLED=true
-            kill $(pgrep -f runserver) || true
-            cd /opt/biteco/manejador_usuarios
-            nohup python3 manage.py runserver 0.0.0.0:8001 \
-              > /var/log/manejador_usuarios.log 2&gt;&amp;1 &amp;
-          Then DISABLE Thread Group 1, ENABLE Thread Group 2 and run:
+        Phase 2 – WITH rate limiting (DISABLE TG1, ENABLE TG2):
+          SSH to manejador_cloud EC2:
+            ssh -i &lt;key.pem&gt; ubuntu@&lt;cloud_ec2_ip&gt;
+            sudo pkill -f "uvicorn main:app" || true; sleep 1
+            cd /opt/biteco/manejador_cloud
+            AUTH_DISABLED=true RATE_LIMIT_ENABLED=true \
+              RATE_LIMIT_REQUESTS=20 RATE_LIMIT_WINDOW=10 \
+              nohup uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4 \
+              &gt; /tmp/manejador_cloud.log 2&gt;&amp;1 &amp;
+            sleep 3 &amp;&amp; curl -s http://localhost:8002/health
+
+          Run from JMeter machine (DISABLE Thread Group 1, ENABLE Thread Group 2):
             jmeter -n -t experiments/security_test.jmx \
               -l results/asr19_protected.jtl \
               -e -o results/asr19_protected_report \
-              -JALB_HOST=&lt;ALB_DNS_without_http&gt;
+              -JALB_HOST=bite2-alb-409016959.us-east-1.elb.amazonaws.com
+
+        After Phase 2, count blocked vs allowed:
+          grep ",201," results/asr19_phase2_codes.csv | wc -l   # allowed
+          grep ",429," results/asr19_phase2_codes.csv | wc -l   # blocked
+          # blocked% = blocked / (blocked + allowed) * 100  — target: >= 90%
 
         Compare P95, average latency, and % of 429 responses between phases.
-        Document the latency vs security trade-off.
+        Document the latency vs security trade-off (P95 of 201 responses in Phase 2
+        must still be &lt;= 500 ms to confirm legitimate users are not degraded).
         ================================================================
       </stringProp>
       <boolProp name="TestPlan.functional_mode">false</boolProp>
@@ -65,7 +79,9 @@
       <!-- ================================================================ -->
       <SetupThreadGroup guiclass="SetupThreadGroupGui" testclass="SetupThreadGroup"
                         testname="setUp – Obtain JWT Token" enabled="true">
-        <stringProp name="ThreadGroup.on_sample_error">stoptest</stringProp>
+        <!-- continue: AUTH_DISABLED=true on manejador_cloud means JWT is not
+             validated — a fallback bypass token is set if auth is unreachable -->
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
                      guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
           <boolProp name="LoopController.continue_forever">false</boolProp>
@@ -115,18 +131,22 @@
             <stringProp name="scriptLanguage">groovy</stringProp>
             <stringProp name="script">import groovy.json.JsonSlurper
 
+// AUTH_DISABLED=true on manejador_cloud — JWT is not validated.
+// Fall back to a bypass token so the test runs even if auth service is down.
 def response = prev.getResponseDataAsString()
 try {
     def json = new JsonSlurper().parseText(response)
     def token = json.access_token
     if (token) {
         props.put("jwt_token", token)
-        log.info("JWT extracted and promoted to property: " + token.take(20) + "...")
+        log.info("JWT extracted: " + token.take(20) + "...")
     } else {
-        log.error("access_token not found in JSON response")
+        props.put("jwt_token", "AUTH_DISABLED_BYPASS")
+        log.warn("access_token not found — using AUTH_DISABLED_BYPASS token")
     }
 } catch (Exception e) {
-    log.error("Failed to parse JSON response: " + e.getMessage())
+    props.put("jwt_token", "AUTH_DISABLED_BYPASS")
+    log.warn("Auth login failed (" + e.getMessage() + ") — using AUTH_DISABLED_BYPASS token")
 }
 </stringProp>
           </JSR223PostProcessor>
